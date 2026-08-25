@@ -1,5 +1,9 @@
 # dsh-chatops
 
+> **用微信和飞书远程操控 DeepSeek Harness——IM 机器人直连全部工作区与会话，任务完成推送，危险操作远程审批。**
+>
+> Drive DeepSeek Harness from WeChat and Feishu — IM bots bridged to every workspace and session, with completion push and remote approval.
+
 用 IM 操控 DeepSeek Harness：**微信（官方 ClawBot / iLink）+ 飞书（自建应用）双通道并行**，机器人和你私聊（或群 @）即可操作所有工作区和会话——任务完成自动推送，危险操作远程审批。
 
 > ✅ 微信走**官方机器人平台（iLink）**，合规、无封号风险、纯 HTTPS 长轮询。
