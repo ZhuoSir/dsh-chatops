@@ -1,4 +1,5 @@
 import { appendFileSync, createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import yaml from "js-yaml";
 import { homedir, tmpdir } from "node:os";
 import { basename, extname, join, resolve, sep } from "node:path";
 import { defineTool } from "@deepseek-ai/dsh-tools";
@@ -3009,6 +3010,38 @@ function apply(ctx, config) {
 							} else writeJson(res, 400, { ok: false });
 							return;
 						}
+						if (pathname === "/chatops/api/config" && req.method === "GET") {
+							writeJson(res, 200, {
+								ok: true,
+								result: config
+							});
+							return;
+						}
+						if (pathname === "/chatops/api/config" && req.method === "POST") {
+							const body = await readBody(req);
+							const next = JSON.parse(body || "{}")?.config;
+							if (!next || typeof next !== "object") {
+								writeJson(res, 400, {
+									ok: false,
+									error: "config object required"
+								});
+								return;
+							}
+							saveProfileOverride(config, next, logger);
+							writeJson(res, 200, {
+								ok: true,
+								result: { hotReload: true }
+							});
+							return;
+						}
+						if (pathname === "/chatops/api/rebind" && req.method === "POST") {
+							if (ilinkChannel) {
+								await ilinkChannel.unbind();
+								await ilinkChannel.start();
+							}
+							writeJson(res, 200, { ok: true });
+							return;
+						}
 						writeJson(res, 404, { ok: false });
 					} catch (error) {
 						try {
@@ -3046,6 +3079,40 @@ function migrateStorage(newDir, logger) {
 	} catch (error) {
 		logger.warn(`dsh-chatops: storage migration failed: ${error?.message ?? error}`);
 	}
+}
+/**
+* Persist the full plugin config as a profile override row (id dsh-chatops)
+* in the profile's cordis.patch.yml. Patch semantics replace the row's whole
+* config, so we always write the COMPLETE merged config. Cordis watches the
+* file and hot-reloads the composition — no restart needed in normal cases.
+*/
+function saveProfileOverride(current, next, logger) {
+	const dshHome = process.env.DSH_HOME ?? join(homedir(), ".dsh");
+	const patchPath = typeof current.profilePatch === "string" && current.profilePatch || join(dshHome, "profiles", "web", "cordis.patch.yml");
+	const merged = {
+		...current,
+		...next
+	};
+	let rows = [];
+	if (existsSync(patchPath)) try {
+		const parsed = yaml.load(readFileSync(patchPath, "utf8"));
+		if (Array.isArray(parsed)) rows = parsed;
+	} catch (error) {
+		logger.warn(`dsh-chatops: profile patch parse failed: ${error?.message ?? error}`);
+	}
+	const index = rows.findIndex((r) => r && typeof r === "object" && r.id === "dsh-chatops" && !r.insert);
+	const row = {
+		id: "dsh-chatops",
+		name: "dsh-chatops",
+		config: merged
+	};
+	if (index >= 0) rows[index] = row;
+	else rows.push(row);
+	writeFileSync(patchPath, yaml.dump(rows, {
+		noRefs: true,
+		lineWidth: 120
+	}), "utf8");
+	logger.info(`dsh-chatops: config saved to ${patchPath} (cordis hot-reloads the composition)`);
 }
 function writeJson(res, status, payload) {
 	res.writeHead(status, { "content-type": "application/json" });
