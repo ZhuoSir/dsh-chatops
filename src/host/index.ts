@@ -10,7 +10,7 @@
  * WeChat ToS, use a throwaway account only).
  */
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import yaml from 'js-yaml'
+import * as yaml from 'js-yaml'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'

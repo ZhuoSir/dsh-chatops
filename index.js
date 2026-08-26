@@ -1,5 +1,5 @@
 import { appendFileSync, createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
-import yaml from "js-yaml";
+import * as yaml from "js-yaml";
 import { homedir, tmpdir } from "node:os";
 import { basename, extname, join, resolve, sep } from "node:path";
 import { defineTool } from "@deepseek-ai/dsh-tools";

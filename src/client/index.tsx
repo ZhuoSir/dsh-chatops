@@ -33,24 +33,24 @@ const STATE_LABELS: Record<string, string> = {
 }
 
 const styles = {
-  wrap: { padding: '16px 20px', maxWidth: 760, fontFamily: 'inherit' } as React.CSSProperties,
-  card: { border: '1px solid var(--dsh-border, #e2e4e9)', borderRadius: 10, padding: '14px 16px', marginBottom: 14, background: 'var(--dsh-surface, #fff)' } as React.CSSProperties,
+  wrap: { padding: '16px 20px', maxWidth: 760, fontFamily: 'inherit', color: 'var(--dsw-alias-label-primary, #1b1b1c)' } as React.CSSProperties,
+  card: { border: '1px solid var(--dsw-alias-border-l2, #e2e4e9)', borderRadius: 10, padding: '14px 16px', marginBottom: 14, background: 'var(--dsw-alias-bg-layer-2, #fff)' } as React.CSSProperties,
   head: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 } as React.CSSProperties,
-  title: { fontWeight: 600, fontSize: 15 } as React.CSSProperties,
-  desc: { color: 'var(--dsh-fg-muted, #888)', fontSize: 12.5, marginBottom: 10 } as React.CSSProperties,
+  title: { fontWeight: 600, fontSize: 15, color: 'var(--dsw-alias-label-primary, #1b1b1c)' } as React.CSSProperties,
+  desc: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 12.5, marginBottom: 10 } as React.CSSProperties,
   dot: (color: string) => ({ width: 9, height: 9, borderRadius: 9, background: color, flexShrink: 0 }) as React.CSSProperties,
-  state: { fontSize: 12.5, color: 'var(--dsh-fg-muted, #888)' } as React.CSSProperties,
-  toggle: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 } as React.CSSProperties,
+  state: { fontSize: 12.5, color: 'var(--dsw-alias-label-tertiary, #888)' } as React.CSSProperties,
+  toggle: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--dsw-alias-label-secondary, #555)' } as React.CSSProperties,
   row: { display: 'flex', gap: 10, marginBottom: 8 } as React.CSSProperties,
   field: { flex: 1, display: 'flex', flexDirection: 'column', gap: 4 } as React.CSSProperties,
-  label: { fontSize: 12, color: 'var(--dsh-fg-muted, #888)' } as React.CSSProperties,
-  input: { padding: '7px 10px', fontSize: 13, borderRadius: 7, border: '1px solid var(--dsh-border, #ddd)', background: 'var(--dsh-bg, #fff)', color: 'inherit' } as React.CSSProperties,
-  btn: { padding: '7px 16px', fontSize: 13, borderRadius: 7, border: '1px solid var(--dsh-border, #ddd)', background: 'var(--dsh-surface, #fff)', cursor: 'pointer', color: 'inherit' } as React.CSSProperties,
-  btnPrimary: { padding: '7px 16px', fontSize: 13, borderRadius: 7, border: 'none', background: '#07c160', color: '#fff', cursor: 'pointer' } as React.CSSProperties,
-  qr: { width: 200, borderRadius: 8, border: '1px solid var(--dsh-border, #eee)', display: 'block', margin: '10px 0' } as React.CSSProperties,
-  toast: { position: 'fixed', bottom: 24, right: 24, background: '#222', color: '#fff', padding: '10px 16px', borderRadius: 8, fontSize: 13, zIndex: 9999 } as React.CSSProperties,
-  err: { color: '#e6432d', fontSize: 12.5, marginTop: 6, wordBreak: 'break-all' } as React.CSSProperties,
-  hint: { fontSize: 12, color: 'var(--dsh-fg-muted, #999)', marginTop: 10 } as React.CSSProperties,
+  label: { fontSize: 12, color: 'var(--dsw-alias-label-caption, #999)' } as React.CSSProperties,
+  input: { padding: '7px 10px', fontSize: 13, borderRadius: 7, border: '1px solid var(--dsw-alias-border-l3, #ddd)', background: 'var(--dsw-specific-input-major, #fff)', color: 'var(--dsw-alias-label-primary, #1b1b1c)' } as React.CSSProperties,
+  btn: { padding: '7px 16px', fontSize: 13, borderRadius: 7, border: '1px solid var(--dsw-alias-border-l3, #ddd)', background: 'var(--dsw-alias-button-elevated-fill, #fff)', cursor: 'pointer', color: 'var(--dsw-alias-label-primary, #1b1b1c)' } as React.CSSProperties,
+  btnPrimary: { padding: '7px 16px', fontSize: 13, borderRadius: 7, border: 'none', background: 'var(--dsw-alias-button-info-fill, #4176e6)', color: '#fff', cursor: 'pointer' } as React.CSSProperties,
+  qr: { width: 200, borderRadius: 8, border: '1px solid var(--dsw-alias-border-l2, #eee)', display: 'block', margin: '10px 0', background: '#fff' } as React.CSSProperties,
+  toast: { position: 'fixed', bottom: 24, right: 24, background: 'var(--dsw-alias-toast-bg, #222)', color: '#fff', padding: '10px 16px', borderRadius: 8, fontSize: 13, zIndex: 9999 } as React.CSSProperties,
+  err: { color: 'var(--dsw-alias-state-error-primary, #e6432d)', fontSize: 12.5, marginTop: 6, wordBreak: 'break-all' } as React.CSSProperties,
+  hint: { fontSize: 12, color: 'var(--dsw-alias-label-caption, #999)', marginTop: 10 } as React.CSSProperties,
 }
 
 function stateColor(state?: string, online?: boolean): string {
