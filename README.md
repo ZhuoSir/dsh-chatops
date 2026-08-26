@@ -16,8 +16,7 @@
 
 ## 截图
 
-> 截图补充中（计划：`docs/images/settings-page.png` 设置页 · `docs/images/wechat-chat.png` 微信对话 · `docs/images/feishu-approval.png` 飞书审批卡）。
-> 上手效果见下方「快速开始」各通道的对话示例。
+![设置页「IM 通道」](docs/images/settings-page.png)
 
 ## 功能特性
 

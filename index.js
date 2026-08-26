@@ -986,6 +986,7 @@ var ILinkChannel = class {
 				continue;
 			}
 			failures = 0;
+			this.lastError = null;
 			for (const raw of response?.msgs ?? []) this.dispatchInbound(raw);
 			if (typeof response?.get_updates_buf === "string" && response.get_updates_buf) this.store.setCursor(response.get_updates_buf);
 		}

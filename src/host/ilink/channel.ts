@@ -278,6 +278,7 @@ export class ILinkChannel {
       }
 
       failures = 0
+      this.lastError = null // a successful batch clears any transient poll error
       for (const raw of response?.msgs ?? []) {
         this.dispatchInbound(raw)
       }
