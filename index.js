@@ -73,11 +73,11 @@ const Config = Schema.object({
 	reply: Schema.object({
 		maxChunkBytes: Schema.number().default(6e3).description("Max bytes per outbound WeChat message; longer text is split into chunks."),
 		rateLimitMs: Schema.number().default(1200).description("Minimum interval between outbound messages (plus random jitter) — anti-risk-control throttling."),
-		maxFileMB: Schema.number().default(20).description("Max file size (MB) allowed for IM file delivery.")
+		maxFileMB: Schema.number().default(100).description("Max file size (MB) allowed for IM file delivery (platform may still reject oversized files).")
 	}).default({
 		maxChunkBytes: 6e3,
 		rateLimitMs: 1200,
-		maxFileMB: 20
+		maxFileMB: 100
 	})
 });
 
