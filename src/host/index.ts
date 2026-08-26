@@ -19,6 +19,7 @@ import { ILinkChannel } from './ilink/channel'
 import { qrDataUrl } from './ilink/qrimg'
 import { FeishuChannel } from './feishu/channel'
 import { DingTalkChannel } from './dingtalk/channel'
+import { WecomChannel } from './wecom/channel'
 import { ChannelManager } from './manager'
 import { AuthStore } from './auth'
 import { SessionBridge } from './bridge'
@@ -60,7 +61,7 @@ export function apply(ctx: any, config: any) {
     // Feishu/DingTalk first-contact owner adoption: when NO owner exists
     // yet, the first private chatter becomes the owner (audited + announced).
     // ilink owners come from QR binding and skip this entirely.
-    if ((msg.windowKey.startsWith('fsu:') || msg.windowKey.startsWith('dsu:')) && !auth.hasOwners()) {
+    if ((msg.windowKey.startsWith('fsu:') || msg.windowKey.startsWith('dsu:') || msg.windowKey.startsWith('wsu:')) && !auth.hasOwners()) {
       auth.addOwner(msg.talkerId)
       auth.audit('owner/adopted', { channel: msg.windowKey.split(':')[0], userId: msg.talkerId })
       void manager.say(
@@ -128,6 +129,15 @@ export function apply(ctx: any, config: any) {
       }, logger)
       manager.register(['dsu:', 'dsc:'], dingtalk)
       channelsByKind.set('dingtalk', dingtalk)
+    } else if (kind === 'wecom') {
+      const wecom = new WecomChannel(config, {
+        onMessage,
+        onLogin: () => {},
+        onLogout: () => {},
+        onScan: () => {},
+      }, logger)
+      manager.register(['wsu:', 'wsc:'], wecom)
+      channelsByKind.set('wecom', wecom)
     } else {
       logger.warn(`dsh-chatops: unknown channel "${kind}", skipped`)
     }

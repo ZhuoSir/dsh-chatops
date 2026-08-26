@@ -30,13 +30,15 @@ const Config = Schema.object({
 		Schema.const("ilink").description("微信官方 ClawBot/iLink 机器人（推荐，合规，扫码绑定）"),
 		Schema.const("wechaty").description("wechaty 个人号协议（封号风险，仅限自用）"),
 		Schema.const("feishu").description("飞书自建应用机器人（官方开放平台）"),
-		Schema.const("dingtalk").description("钉钉企业内部应用机器人（官方开放平台，Stream 长连接）")
+		Schema.const("dingtalk").description("钉钉企业内部应用机器人（官方开放平台，Stream 长连接）"),
+		Schema.const("wecom").description("企业微信智能机器人（官方 aibot SDK，WS 长连接；仅企业内成员可见）")
 	]).default("ilink").description("[单通道兼容项] 通道实现；channels 非空时忽略。"),
 	channels: Schema.array(Schema.union([
 		Schema.const("ilink"),
 		Schema.const("wechaty"),
 		Schema.const("feishu"),
-		Schema.const("dingtalk")
+		Schema.const("dingtalk"),
+		Schema.const("wecom")
 	])).default(["ilink"]).description("启用的通道列表（可多选并行，如 [ilink, feishu, dingtalk]）。"),
 	dingtalk: Schema.object({
 		clientId: Schema.string().default("").description("钉钉企业内部应用 Client ID（AppKey），同时作为 robotCode。"),
@@ -45,6 +47,13 @@ const Config = Schema.object({
 		clientId: "",
 		clientSecret: ""
 	}).description("[dingtalk] 企业内部应用凭据。"),
+	wecom: Schema.object({
+		botId: Schema.string().default("").description("企业微信智能机器人 Bot ID。"),
+		secret: Schema.string().default("").description("企业微信智能机器人 Secret。")
+	}).default({
+		botId: "",
+		secret: ""
+	}).description("[wecom] 智能机器人凭据。"),
 	feishu: Schema.object({
 		appId: Schema.string().default("").description("飞书自建应用 App ID。"),
 		appSecret: Schema.string().default("").description("飞书自建应用 App Secret。"),
@@ -1343,7 +1352,7 @@ function escapeMd(text) {
 * windowKey 命名：`fsu:{open_id}` 私聊，`fsc:{chat_id}` 群聊。
 * SDK 是可选依赖：未安装时插件照常加载并给出安装指引。
 */
-const SEND_INTERVAL_MS$1 = 300;
+const SEND_INTERVAL_MS$2 = 300;
 var FeishuChannel = class {
 	config;
 	events;
@@ -1618,7 +1627,7 @@ var FeishuChannel = class {
 		}
 	}
 	async throttle() {
-		const wait = this.lastSentAt + SEND_INTERVAL_MS$1 - Date.now();
+		const wait = this.lastSentAt + SEND_INTERVAL_MS$2 - Date.now();
 		if (wait > 0) await new Promise((r) => setTimeout(r, wait));
 		this.lastSentAt = Date.now();
 	}
@@ -1628,7 +1637,7 @@ var FeishuChannel = class {
 //#region src/host/dingtalk/channel.ts
 const API_BASE = "https://api.dingtalk.com/";
 const OAPI_BASE = "https://oapi.dingtalk.com/";
-const SEND_INTERVAL_MS = 300;
+const SEND_INTERVAL_MS$1 = 300;
 var DingTalkChannel = class {
 	config;
 	events;
@@ -1854,6 +1863,197 @@ var DingTalkChannel = class {
 		return String(mediaId);
 	}
 	async throttle() {
+		const wait = this.lastSentAt + SEND_INTERVAL_MS$1 - Date.now();
+		if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+		this.lastSentAt = Date.now();
+	}
+};
+
+//#endregion
+//#region src/host/wecom/channel.ts
+/**
+* WecomChannel: 企业微信智能机器人通道（官方 @wecom/aibot-node-sdk）。
+*
+* - 收消息：WSClient WebSocket 长连接（botId + secret 鉴权），主动出站、
+*   零公网回调；私聊直接响应，群聊靠投递即 @（群回调文本自带 @机器人 前缀，
+*   剥离后入桥）。
+* - 发消息：client.sendMessage(chatId, {msgtype:'text', text:{content}})；
+*   文件/图片：client.uploadMedia → client.sendMediaMessage。
+* - 流式（replyStream：正在思考中/进度/流式回答）是企微独有原生能力，二期接入。
+* - SDK 为可选依赖：未安装时插件照常加载并给出安装指引。
+*
+* windowKey 命名：`wsu:{userid}` 私聊，`wsc:{chatid}` 群聊。
+* 注意：企微智能机器人仅面向企业内部成员，个人微信不可见。
+*/
+const SEND_INTERVAL_MS = 300;
+var WecomChannel = class {
+	config;
+	events;
+	logger;
+	client = null;
+	state = "idle";
+	lastError = null;
+	outQueue = Promise.resolve();
+	lastSentAt = 0;
+	constructor(config, events, logger) {
+		this.config = config;
+		this.events = events;
+		this.logger = logger;
+	}
+	get online() {
+		return this.state === "connected";
+	}
+	statusSnapshot() {
+		return {
+			state: this.state,
+			online: this.online,
+			lastError: this.lastError
+		};
+	}
+	async start() {
+		const botId = this.config.wecom?.botId;
+		const secret = this.config.wecom?.secret;
+		if (!botId || !secret) {
+			this.logger.warn("dsh-chatops: wecom.botId / wecom.secret 未配置，企业微信通道未启动");
+			this.state = "idle";
+			this.lastError = "missing botId/secret";
+			return;
+		}
+		let WSClient;
+		try {
+			({WSClient} = await import("@wecom/aibot-node-sdk"));
+		} catch {
+			this.logger.warn("dsh-chatops: 未安装 @wecom/aibot-node-sdk。在插件目录执行：pnpm add @wecom/aibot-node-sdk");
+			this.state = "error";
+			this.lastError = "wecom sdk not installed";
+			return;
+		}
+		this.state = "connecting";
+		const client = new WSClient({
+			botId,
+			secret,
+			logger: {
+				debug() {},
+				info() {},
+				warn() {},
+				error() {}
+			}
+		});
+		client.on("message", (frame) => {
+			Promise.resolve().then(() => this.handleMessage(frame)).catch((error) => this.logger.warn(`dsh-chatops: 企微消息处理失败: ${error?.message ?? error}`));
+		});
+		client.on("authenticated", () => {
+			this.state = "connected";
+			this.lastError = null;
+			this.logger.info("dsh-chatops: 企业微信长连接已建立");
+		});
+		client.on("disconnected", () => {
+			if (this.state === "connected") this.state = "connecting";
+		});
+		client.on("error", (error) => {
+			this.lastError = error?.message ?? String(error);
+			this.logger.warn(`dsh-chatops: 企微连接错误: ${this.lastError}`);
+		});
+		this.client = client;
+		Promise.resolve().then(() => client.connect()).catch((error) => {
+			this.state = "error";
+			this.lastError = error?.message ?? String(error);
+			this.logger.warn(`dsh-chatops: 企微 WSClient 启动失败: ${this.lastError}`);
+		});
+	}
+	async stop() {
+		this.state = "idle";
+		try {
+			this.client?.disconnect?.();
+		} catch {}
+		this.client = null;
+	}
+	/** Frame body: { msgtype, chattype: 'single'|'group', chatid, from: {userid}, text/voice/mixed }. */
+	handleMessage(frame) {
+		const body = frame?.body ?? frame;
+		let text = "";
+		if (body?.msgtype === "text") text = String(body?.text?.content ?? "").trim();
+		else if (body?.msgtype === "voice") text = String(body?.voice?.content ?? "").trim();
+		else if (body?.msgtype === "mixed" && Array.isArray(body?.mixed?.msg_item)) text = body.mixed.msg_item.filter((item) => item?.msgtype === "text" && typeof item?.text?.content === "string").map((item) => item.text.content).join("\n").trim();
+		else return;
+		if (!text) return;
+		const userId = body?.from?.userid ?? "";
+		if (!userId) return;
+		if (body.chattype === "group") {
+			const stripped = text.replace(/^\s*@\S+(?:\s+|$)/u, "").trim();
+			if (!stripped) return;
+			this.events.onMessage({
+				windowKey: `wsc:${body.chatid}`,
+				kind: "room",
+				talkerId: userId,
+				talkerName: userId,
+				text: stripped
+			});
+			return;
+		}
+		this.events.onMessage({
+			windowKey: `wsu:${userId}`,
+			kind: "contact",
+			talkerId: userId,
+			talkerName: userId,
+			text
+		});
+	}
+	say(windowKey, text, _opts) {
+		const chunks = chunkText(text, this.config.reply?.maxChunkBytes ?? 6e3);
+		this.outQueue = this.outQueue.then(async () => {
+			for (const chunk of chunks) {
+				await this.throttle();
+				await this.sendText(windowKey, chunk);
+			}
+		});
+		return this.outQueue;
+	}
+	/** Native file/image delivery: uploadMedia → sendMediaMessage. */
+	async sendFile(windowKey, filePath, caption) {
+		if (!this.client) throw new Error("企业微信通道未连接");
+		const maxMB = this.config.reply?.maxFileMB ?? 100;
+		const info = await stat(filePath);
+		if (info.size > maxMB * 1024 * 1024) throw new Error(`文件超过 ${maxMB}MB 上限（${(info.size / 1048576).toFixed(1)}MB）`);
+		const fileName = basename(filePath);
+		const isImage = [
+			".jpg",
+			".jpeg",
+			".png",
+			".webp",
+			".gif"
+		].includes(extname(fileName).toLowerCase());
+		this.outQueue = this.outQueue.then(async () => {
+			try {
+				const bytes = await readFile(filePath);
+				const mediaId = await this.client.uploadMedia(bytes, {
+					type: isImage ? "image" : "file",
+					filename: fileName
+				});
+				await this.client.sendMediaMessage(this.chatIdOf(windowKey), isImage ? "image" : "file", mediaId);
+				if (caption) await this.say(windowKey, caption);
+			} catch (error) {
+				this.logger.warn(`dsh-chatops: 企微文件发送失败 ${fileName}: ${error?.message ?? error}`);
+				await this.say(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`);
+			}
+		});
+		return this.outQueue;
+	}
+	chatIdOf(windowKey) {
+		return windowKey.replace(/^(wsu|wsc):/, "");
+	}
+	async sendText(windowKey, text) {
+		if (!this.client) return;
+		try {
+			await this.client.sendMessage(this.chatIdOf(windowKey), {
+				msgtype: "text",
+				text: { content: text }
+			});
+		} catch (error) {
+			this.logger.warn(`dsh-chatops: 企微发送失败: ${error?.message ?? error}`);
+		}
+	}
+	async throttle() {
 		const wait = this.lastSentAt + SEND_INTERVAL_MS - Date.now();
 		if (wait > 0) await new Promise((r) => setTimeout(r, wait));
 		this.lastSentAt = Date.now();
@@ -1863,6 +2063,8 @@ var DingTalkChannel = class {
 //#endregion
 //#region src/host/manager.ts
 const PREFIXES = [
+	"wsu:",
+	"wsc:",
 	"dsu:",
 	"dsc:",
 	"fsu:",
@@ -1939,12 +2141,12 @@ var AuthStore = class {
 			case "filehelper": return sec.listenFilehelper !== false;
 			case "self": return sec.listenSelf !== false;
 			case "contact": {
-				const id = windowKey.replace(/^(user|contact|fsu|dsu):/, "");
+				const id = windowKey.replace(/^(user|contact|fsu|dsu|wsu):/, "");
 				if (this.ownerIds.has(id)) return true;
 				return (sec.allowContacts ?? []).includes(id);
 			}
 			case "room": {
-				const id = windowKey.replace(/^(room|fsc|dsc):/, "");
+				const id = windowKey.replace(/^(room|fsc|dsc|wsc):/, "");
 				return (sec.allowRooms ?? []).includes(id);
 			}
 			default: return false;
@@ -2641,7 +2843,7 @@ function apply(ctx, config) {
 	const auth = new AuthStore(config, storageDir, logger);
 	let ilinkChannel = null;
 	const onMessage = (msg) => {
-		if ((msg.windowKey.startsWith("fsu:") || msg.windowKey.startsWith("dsu:")) && !auth.hasOwners()) {
+		if ((msg.windowKey.startsWith("fsu:") || msg.windowKey.startsWith("dsu:") || msg.windowKey.startsWith("wsu:")) && !auth.hasOwners()) {
 			auth.addOwner(msg.talkerId);
 			auth.audit("owner/adopted", {
 				channel: msg.windowKey.split(":")[0],
@@ -2718,6 +2920,15 @@ function apply(ctx, config) {
 		}, logger);
 		manager.register(["dsu:", "dsc:"], dingtalk);
 		channelsByKind.set("dingtalk", dingtalk);
+	} else if (kind === "wecom") {
+		const wecom = new WecomChannel(config, {
+			onMessage,
+			onLogin: () => {},
+			onLogout: () => {},
+			onScan: () => {}
+		}, logger);
+		manager.register(["wsu:", "wsc:"], wecom);
+		channelsByKind.set("wecom", wecom);
 	} else logger.warn(`dsh-chatops: unknown channel "${kind}", skipped`);
 	const bridge = new SessionBridge(ctx, config, manager, auth, logger);
 	bridge.start();

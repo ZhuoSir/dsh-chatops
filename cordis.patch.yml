@@ -13,9 +13,10 @@
         #   wechaty  个人微信号 Bot（违反微信用户协议，封号风险，仅限自用）
         #   feishu   飞书自建应用机器人（官方开放平台，长连接）
         #   dingtalk 钉钉企业内部应用机器人（官方开放平台，Stream 长连接）
+        #   wecom    企业微信智能机器人（官方 aibot SDK，WS 长连接；仅企业内成员可见）
         channel: 'ilink'
         # 启用的通道列表，可多选并行。未填凭据的通道空转，不影响其他通道。
-        channels: [ilink, feishu, dingtalk]
+        channels: [ilink, feishu, dingtalk, wecom]
         # [feishu] 自建应用凭据（飞书开发者后台 → 企业自建应用 → 机器人能力）：
         feishu:
           appId: ''
@@ -28,6 +29,10 @@
           clientId: ''
           # Client Secret（AppSecret）
           clientSecret: ''
+        # [wecom] 智能机器人凭据（企业微信管理后台 → 智能机器人）：
+        wecom:
+          botId: ''
+          secret: ''
         # [wechaty] 协议实现（ilink 通道忽略以下两项）：
         #   wechaty-puppet-wechat4u  免费网页协议（部分号无法登录）
         #   wechaty-puppet-padlocal  付费 iPad 协议（稳定，需 token）

@@ -6,17 +6,23 @@ export const Config = Schema.object({
     Schema.const('wechaty').description('wechaty 个人号协议（封号风险，仅限自用）'),
     Schema.const('feishu').description('飞书自建应用机器人（官方开放平台）'),
     Schema.const('dingtalk').description('钉钉企业内部应用机器人（官方开放平台，Stream 长连接）'),
+    Schema.const('wecom').description('企业微信智能机器人（官方 aibot SDK，WS 长连接；仅企业内成员可见）'),
   ]).default('ilink').description('[单通道兼容项] 通道实现；channels 非空时忽略。'),
   channels: Schema.array(Schema.union([
     Schema.const('ilink'),
     Schema.const('wechaty'),
     Schema.const('feishu'),
     Schema.const('dingtalk'),
+    Schema.const('wecom'),
   ])).default(['ilink']).description('启用的通道列表（可多选并行，如 [ilink, feishu, dingtalk]）。'),
   dingtalk: Schema.object({
     clientId: Schema.string().default('').description('钉钉企业内部应用 Client ID（AppKey），同时作为 robotCode。'),
     clientSecret: Schema.string().default('').description('钉钉企业内部应用 Client Secret（AppSecret）。'),
   }).default({ clientId: '', clientSecret: '' }).description('[dingtalk] 企业内部应用凭据。'),
+  wecom: Schema.object({
+    botId: Schema.string().default('').description('企业微信智能机器人 Bot ID。'),
+    secret: Schema.string().default('').description('企业微信智能机器人 Secret。'),
+  }).default({ botId: '', secret: '' }).description('[wecom] 智能机器人凭据。'),
   feishu: Schema.object({
     appId: Schema.string().default('').description('飞书自建应用 App ID。'),
     appSecret: Schema.string().default('').description('飞书自建应用 App Secret。'),

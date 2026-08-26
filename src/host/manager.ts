@@ -17,7 +17,7 @@ export interface ManagedChannel {
   readonly online: boolean
 }
 
-const PREFIXES = ['dsu:', 'dsc:', 'fsu:', 'fsc:', 'user:', 'contact:', 'room:', 'filehelper', 'self']
+const PREFIXES = ['wsu:', 'wsc:', 'dsu:', 'dsc:', 'fsu:', 'fsc:', 'user:', 'contact:', 'room:', 'filehelper', 'self']
 
 export class ChannelManager {
   private channels = new Map<string, ManagedChannel>() // prefix → channel

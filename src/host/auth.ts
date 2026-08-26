@@ -57,14 +57,15 @@ export class AuthStore {
         return sec.listenSelf !== false
       case 'contact': {
         // windowKey: `user:{id}` (ilink) / `contact:{wxid}` (wechaty)
-        // / `fsu:{open_id}` (feishu) / `dsu:{staffId}` (dingtalk).
-        const id = windowKey.replace(/^(user|contact|fsu|dsu):/, '')
+        // / `fsu:{open_id}` (feishu) / `dsu:{staffId}` (dingtalk) / `wsu:{userid}` (wecom).
+        const id = windowKey.replace(/^(user|contact|fsu|dsu|wsu):/, '')
         if (this.ownerIds.has(id)) return true
         return (sec.allowContacts ?? []).includes(id)
       }
       case 'room': {
-        // `room:{topic}` (wechaty) / `fsc:{chat_id}` (feishu) / `dsc:{conversationId}` (dingtalk).
-        const id = windowKey.replace(/^(room|fsc|dsc):/, '')
+        // `room:{topic}` (wechaty) / `fsc:{chat_id}` (feishu)
+        // / `dsc:{conversationId}` (dingtalk) / `wsc:{chatid}` (wecom).
+        const id = windowKey.replace(/^(room|fsc|dsc|wsc):/, '')
         return (sec.allowRooms ?? []).includes(id)
       }
       default:
