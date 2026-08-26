@@ -13,8 +13,8 @@
         #   wechaty  个人微信号 Bot（违反微信用户协议，封号风险，仅限自用）
         #   feishu   飞书自建应用机器人（官方开放平台，长连接）
         channel: 'ilink'
-        # 启用的通道列表，可多选并行。例：[ilink, feishu] 微信+飞书同时在线。
-        channels: [ilink]
+        # 启用的通道列表，可多选并行。微信+飞书同时在线；飞书未填凭据时该通道空转。
+        channels: [ilink, feishu]
         # [feishu] 自建应用凭据（飞书开发者后台 → 企业自建应用 → 机器人能力）：
         feishu:
           appId: ''
