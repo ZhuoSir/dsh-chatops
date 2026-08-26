@@ -4,22 +4,23 @@
 >
 > Drive DeepSeek Harness from WeChat and Feishu — IM bots bridged to every workspace and session, with completion push and remote approval.
 
-用 IM 操控 DeepSeek Harness：**微信（官方 ClawBot / iLink）+ 飞书（自建应用）双通道并行**，机器人和你私聊（或群 @）即可操作所有工作区和会话——任务完成自动推送，危险操作远程审批。
+用 IM 操控 DeepSeek Harness：**微信（官方 ClawBot / iLink）+ 飞书（自建应用）+ 钉钉（企业内部应用）三通道并行**，机器人和你私聊（或群 @）即可操作所有工作区和会话——任务完成自动推送，危险操作远程审批。
 
 > ✅ 微信走**官方机器人平台（iLink）**，合规、无封号风险、纯 HTTPS 长轮询。
 > ✅ 飞书走**官方开放平台自建应用**，WS 长连接，支持**审批卡片按钮**和**流式进度卡**。
+> ✅ 钉钉走**官方开放平台企业内部应用**，Stream 长连接，文本/文件回传齐备。
 > ⚠️ 备选通道 wechaty（个人号协议）违反微信用户协议，仅供自用、务必小号。
 
 ## 功能
 
-- 🔀 多通道并行：`channels: [ilink, feishu]` 微信飞书同时在线，指令集完全一致
+- 🔀 多通道并行：`channels: [ilink, feishu, dingtalk]` 微信/飞书/钉钉同时在线，指令集完全一致
 - 📱 微信：浏览器打开 `/wechat/qr` 扫码绑定一次，`bot_token` 长效，重启免扫码
 - 🐦 飞书：填 App ID/Secret 即用，私聊直聊、群里 @机器人、首个私聊用户自动成为管理员
 - 🗂 指令：`/sessions`（含 📦 冷会话自动唤醒）、`/use`、`/status`、`/log`（完整输出）、`/approve` `/reject`
 - 🚀 普通文字直接作为 prompt 发给绑定会话（首次自动绑定最近活跃会话）
 - 🃏 飞书专属：审批发**交互卡片**（点【批准】【拒绝】按钮，卡片原地变终态）；任务发**进度卡**，完成后原地更新为结果
 - 🔐 微信 bot_token 存 DSH 凭据存储；owner/白名单模型，陌生人消息静默忽略 + 审计
-- 📎 文件回传（微信+飞书）：模型调用 `im_send_file` 工具主动把成果文件发到 IM（图片直接显示，其他为文件卡片）；`/send <路径>` 手动回传；`/log` 超长输出自动转 txt 文件
+- 📎 文件回传（微信+飞书+钉钉）：模型调用 `im_send_file` 工具主动把成果文件发到 IM（图片直接显示，其他为文件卡片）；`/send <路径>` 手动回传；`/log` 超长输出自动转 txt 文件
 - 🛡 微信发送双通道队列（交互消息优先，长输出不堵回执）；掉线自动重连；全量审计日志
 
 ## 安装
@@ -60,6 +61,15 @@ dsh plugin --profile web add /path/to/dsh-chatops
 6. 飞书里搜到机器人直接私聊——**首个私聊用户自动成为管理员**（审计日志记录，可在 `security.allowContacts` 改白名单模型）。
 
 群聊：把机器人拉进群，`security.allowRooms` 填群 `chat_id`，群里 @机器人 下指令。
+
+## 使用（dingtalk 通道）
+
+1. [钉钉开放平台](https://open-dev.dingtalk.com)创建组织（个人可免费建团队）→ 创建**企业内部应用** → 添加**机器人**能力；
+2. 消息接收模式选 **Stream 模式**；
+3. 记录 **Client ID / Client Secret**（AppKey/AppSecret）；
+4. 权限：机器人消息收发相关权限（按控制台提示）；文件回传需媒体上传权限；
+5. 配置 `dingtalk.clientId/clientSecret`，重启 `dsh web`；
+6. 钉钉里搜到机器人私聊——**首个私聊用户自动成为管理员**。群里 @机器人 需把 `security.allowRooms` 填群 `conversationId`。
 
 ## 使用（wechaty 通道，备选）
 

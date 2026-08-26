@@ -5,12 +5,18 @@ export const Config = Schema.object({
     Schema.const('ilink').description('微信官方 ClawBot/iLink 机器人（推荐，合规，扫码绑定）'),
     Schema.const('wechaty').description('wechaty 个人号协议（封号风险，仅限自用）'),
     Schema.const('feishu').description('飞书自建应用机器人（官方开放平台）'),
+    Schema.const('dingtalk').description('钉钉企业内部应用机器人（官方开放平台，Stream 长连接）'),
   ]).default('ilink').description('[单通道兼容项] 通道实现；channels 非空时忽略。'),
   channels: Schema.array(Schema.union([
     Schema.const('ilink'),
     Schema.const('wechaty'),
     Schema.const('feishu'),
-  ])).default(['ilink']).description('启用的通道列表（可多选并行，如 [ilink, feishu]）。'),
+    Schema.const('dingtalk'),
+  ])).default(['ilink']).description('启用的通道列表（可多选并行，如 [ilink, feishu, dingtalk]）。'),
+  dingtalk: Schema.object({
+    clientId: Schema.string().default('').description('钉钉企业内部应用 Client ID（AppKey），同时作为 robotCode。'),
+    clientSecret: Schema.string().default('').description('钉钉企业内部应用 Client Secret（AppSecret）。'),
+  }).default({ clientId: '', clientSecret: '' }).description('[dingtalk] 企业内部应用凭据。'),
   feishu: Schema.object({
     appId: Schema.string().default('').description('飞书自建应用 App ID。'),
     appSecret: Schema.string().default('').description('飞书自建应用 App Secret。'),

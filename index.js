@@ -29,13 +29,22 @@ const Config = Schema.object({
 	channel: Schema.union([
 		Schema.const("ilink").description("微信官方 ClawBot/iLink 机器人（推荐，合规，扫码绑定）"),
 		Schema.const("wechaty").description("wechaty 个人号协议（封号风险，仅限自用）"),
-		Schema.const("feishu").description("飞书自建应用机器人（官方开放平台）")
+		Schema.const("feishu").description("飞书自建应用机器人（官方开放平台）"),
+		Schema.const("dingtalk").description("钉钉企业内部应用机器人（官方开放平台，Stream 长连接）")
 	]).default("ilink").description("[单通道兼容项] 通道实现；channels 非空时忽略。"),
 	channels: Schema.array(Schema.union([
 		Schema.const("ilink"),
 		Schema.const("wechaty"),
-		Schema.const("feishu")
-	])).default(["ilink"]).description("启用的通道列表（可多选并行，如 [ilink, feishu]）。"),
+		Schema.const("feishu"),
+		Schema.const("dingtalk")
+	])).default(["ilink"]).description("启用的通道列表（可多选并行，如 [ilink, feishu, dingtalk]）。"),
+	dingtalk: Schema.object({
+		clientId: Schema.string().default("").description("钉钉企业内部应用 Client ID（AppKey），同时作为 robotCode。"),
+		clientSecret: Schema.string().default("").description("钉钉企业内部应用 Client Secret（AppSecret）。")
+	}).default({
+		clientId: "",
+		clientSecret: ""
+	}).description("[dingtalk] 企业内部应用凭据。"),
 	feishu: Schema.object({
 		appId: Schema.string().default("").description("飞书自建应用 App ID。"),
 		appSecret: Schema.string().default("").description("飞书自建应用 App Secret。"),
@@ -1334,7 +1343,7 @@ function escapeMd(text) {
 * windowKey 命名：`fsu:{open_id}` 私聊，`fsc:{chat_id}` 群聊。
 * SDK 是可选依赖：未安装时插件照常加载并给出安装指引。
 */
-const SEND_INTERVAL_MS = 300;
+const SEND_INTERVAL_MS$1 = 300;
 var FeishuChannel = class {
 	config;
 	events;
@@ -1609,6 +1618,242 @@ var FeishuChannel = class {
 		}
 	}
 	async throttle() {
+		const wait = this.lastSentAt + SEND_INTERVAL_MS$1 - Date.now();
+		if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+		this.lastSentAt = Date.now();
+	}
+};
+
+//#endregion
+//#region src/host/dingtalk/channel.ts
+const API_BASE = "https://api.dingtalk.com/";
+const OAPI_BASE = "https://oapi.dingtalk.com/";
+const SEND_INTERVAL_MS = 300;
+var DingTalkChannel = class {
+	config;
+	events;
+	logger;
+	client = null;
+	state = "idle";
+	lastError = null;
+	tokenCache = null;
+	outQueue = Promise.resolve();
+	lastSentAt = 0;
+	constructor(config, events, logger) {
+		this.config = config;
+		this.events = events;
+		this.logger = logger;
+	}
+	get online() {
+		return this.state === "connected";
+	}
+	statusSnapshot() {
+		return {
+			state: this.state,
+			online: this.online,
+			lastError: this.lastError
+		};
+	}
+	async start() {
+		const clientId = this.config.dingtalk?.clientId;
+		const clientSecret = this.config.dingtalk?.clientSecret;
+		if (!clientId || !clientSecret) {
+			this.logger.warn("dsh-chatops: dingtalk.clientId / clientSecret 未配置，钉钉通道未启动");
+			this.state = "idle";
+			this.lastError = "missing clientId/clientSecret";
+			return;
+		}
+		let DWClient, TOPIC_ROBOT;
+		try {
+			({DWClient, TOPIC_ROBOT} = await import("dingtalk-stream"));
+		} catch {
+			this.logger.warn("dsh-chatops: 未安装 dingtalk-stream。在插件目录执行：pnpm add dingtalk-stream");
+			this.state = "error";
+			this.lastError = "dingtalk-stream not installed";
+			return;
+		}
+		try {
+			await this.accessToken();
+		} catch (error) {
+			this.state = "error";
+			this.lastError = error?.message ?? String(error);
+			this.logger.warn(`dsh-chatops: 钉钉凭据校验失败: ${this.lastError}`);
+			return;
+		}
+		this.state = "connecting";
+		const client = new DWClient({
+			clientId,
+			clientSecret,
+			endpoint: API_BASE.replace(/\/$/, ""),
+			autoReconnect: true,
+			keepAlive: true,
+			debug: false
+		});
+		this.client = client;
+		client.registerCallbackListener(TOPIC_ROBOT, (response) => {
+			const messageId = response?.headers?.messageId;
+			if (messageId) try {
+				client.socketCallBackResponse(messageId, { success: true });
+			} catch {}
+			Promise.resolve().then(async () => {
+				const message = typeof response?.data === "string" ? JSON.parse(response.data) : response?.data;
+				if (message) this.handleMessage(message);
+			}).catch((error) => this.logger.warn(`dsh-chatops: 钉钉消息处理失败: ${error?.message ?? error}`));
+		});
+		try {
+			await client.connect();
+			this.state = "connected";
+			this.lastError = null;
+			this.logger.info("dsh-chatops: 钉钉 Stream 长连接已建立");
+		} catch (error) {
+			this.state = "error";
+			this.lastError = error?.message ?? String(error);
+			this.logger.warn(`dsh-chatops: 钉钉连接失败: ${this.lastError}`);
+		}
+	}
+	async stop() {
+		this.state = "idle";
+		try {
+			this.client?.disconnect?.();
+		} catch {}
+		this.client = null;
+	}
+	/** Robot callback payload (Stream TOPIC_ROBOT). */
+	handleMessage(message) {
+		if (message?.msgtype !== "text") return;
+		const text = String(message?.text?.content ?? "").trim();
+		if (!text) return;
+		const staffId = message?.senderStaffId ?? "";
+		if (!staffId) return;
+		if (String(message?.conversationType) === "2") {
+			if (message?.isInAtList !== true) return;
+			const stripped = text.replace(/@\S+/g, "").trim();
+			if (!stripped) return;
+			this.events.onMessage({
+				windowKey: `dsc:${message.conversationId}`,
+				kind: "room",
+				talkerId: staffId,
+				talkerName: message?.senderNick ?? staffId,
+				text: stripped
+			});
+			return;
+		}
+		this.events.onMessage({
+			windowKey: `dsu:${staffId}`,
+			kind: "contact",
+			talkerId: staffId,
+			talkerName: message?.senderNick ?? staffId,
+			text
+		});
+	}
+	say(windowKey, text, _opts) {
+		const chunks = chunkText(text, this.config.reply?.maxChunkBytes ?? 6e3);
+		this.outQueue = this.outQueue.then(async () => {
+			for (const chunk of chunks) {
+				await this.throttle();
+				await this.sendRobotMessage(windowKey, "sampleText", { content: chunk });
+			}
+		});
+		return this.outQueue;
+	}
+	/** Native file/image delivery: oapi media/upload → sampleFile / sampleImageMsg. */
+	async sendFile(windowKey, filePath, caption) {
+		const maxMB = this.config.reply?.maxFileMB ?? 100;
+		const info = await stat(filePath);
+		if (info.size > maxMB * 1024 * 1024) throw new Error(`文件超过 ${maxMB}MB 上限（${(info.size / 1048576).toFixed(1)}MB）`);
+		const fileName = basename(filePath);
+		const isImage = [
+			".jpg",
+			".jpeg",
+			".png",
+			".webp",
+			".gif"
+		].includes(extname(fileName).toLowerCase());
+		this.outQueue = this.outQueue.then(async () => {
+			try {
+				const mediaId = await this.uploadMedia(filePath, isImage ? "image" : "file");
+				if (isImage) await this.sendRobotMessage(windowKey, "sampleImageMsg", { photoURL: mediaId });
+				else await this.sendRobotMessage(windowKey, "sampleFile", {
+					mediaId,
+					fileName,
+					fileType: extname(fileName).replace(".", "")
+				});
+				if (caption) await this.say(windowKey, caption);
+			} catch (error) {
+				this.logger.warn(`dsh-chatops: 钉钉文件发送失败 ${fileName}: ${error?.message ?? error}`);
+				await this.say(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`);
+			}
+		});
+		return this.outQueue;
+	}
+	async accessToken() {
+		const clientId = this.config.dingtalk?.clientId;
+		const clientSecret = this.config.dingtalk?.clientSecret;
+		if (this.tokenCache && this.tokenCache.expiresAt > Date.now()) return this.tokenCache.token;
+		const response = await fetch(new URL("v1.0/oauth2/accessToken", API_BASE), {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				appKey: clientId,
+				appSecret: clientSecret
+			}),
+			signal: AbortSignal.timeout(15e3)
+		});
+		const value = await response.json().catch(() => null);
+		const token = value?.accessToken;
+		if (!token) throw new Error(`钉钉未返回 accessToken（HTTP ${response.status}）`);
+		const expireIn = Number(value?.expireIn ?? value?.expiresIn ?? 7200);
+		this.tokenCache = {
+			token,
+			expiresAt: Date.now() + Math.max(60, expireIn - 60) * 1e3
+		};
+		return token;
+	}
+	async sendRobotMessage(windowKey, msgKey, msgParam) {
+		const token = await this.accessToken();
+		const robotCode = this.config.dingtalk?.clientId;
+		const isGroup = windowKey.startsWith("dsc:");
+		const body = {
+			robotCode,
+			msgKey,
+			msgParam: JSON.stringify(msgParam),
+			...isGroup ? { openConversationId: windowKey.slice(4) } : { userIds: [windowKey.slice(4)] }
+		};
+		const response = await fetch(new URL(isGroup ? "v1.0/robot/groupMessages/send" : "v1.0/robot/oToMessages/batchSend", API_BASE), {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				"x-acs-dingtalk-access-token": token
+			},
+			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(15e3)
+		});
+		const value = await response.json().catch(() => null);
+		const code = value?.errcode ?? value?.code;
+		if (!response.ok || code !== void 0 && code !== 0 && code !== "0") throw new Error(`钉钉发送被拒: HTTP ${response.status} ${value?.errmessage ?? value?.message ?? ""}`);
+	}
+	async uploadMedia(filePath, type) {
+		const token = await this.accessToken();
+		const url = new URL("media/upload", OAPI_BASE);
+		url.searchParams.set("access_token", token);
+		url.searchParams.set("type", type);
+		const form = new FormData();
+		const bytes = await stat(filePath).then(async () => {
+			const { readFile } = await import("node:fs/promises");
+			return readFile(filePath);
+		});
+		form.append("media", new Blob([new Uint8Array(bytes)]), basename(filePath));
+		const response = await fetch(url, {
+			method: "POST",
+			body: form,
+			signal: AbortSignal.timeout(6e4)
+		});
+		const value = await response.json().catch(() => null);
+		const mediaId = value?.media_id;
+		if (!mediaId) throw new Error(`钉钉媒体上传被拒: ${value?.errmsg ?? `HTTP ${response.status}`}`);
+		return String(mediaId);
+	}
+	async throttle() {
 		const wait = this.lastSentAt + SEND_INTERVAL_MS - Date.now();
 		if (wait > 0) await new Promise((r) => setTimeout(r, wait));
 		this.lastSentAt = Date.now();
@@ -1618,6 +1863,8 @@ var FeishuChannel = class {
 //#endregion
 //#region src/host/manager.ts
 const PREFIXES = [
+	"dsu:",
+	"dsc:",
 	"fsu:",
 	"fsc:",
 	"user:",
@@ -1692,12 +1939,12 @@ var AuthStore = class {
 			case "filehelper": return sec.listenFilehelper !== false;
 			case "self": return sec.listenSelf !== false;
 			case "contact": {
-				const id = windowKey.replace(/^(user|contact|fsu):/, "");
+				const id = windowKey.replace(/^(user|contact|fsu|dsu):/, "");
 				if (this.ownerIds.has(id)) return true;
 				return (sec.allowContacts ?? []).includes(id);
 			}
 			case "room": {
-				const id = windowKey.replace(/^(room|fsc):/, "");
+				const id = windowKey.replace(/^(room|fsc|dsc):/, "");
 				return (sec.allowRooms ?? []).includes(id);
 			}
 			default: return false;
@@ -2394,11 +2641,11 @@ function apply(ctx, config) {
 	const auth = new AuthStore(config, storageDir, logger);
 	let ilinkChannel = null;
 	const onMessage = (msg) => {
-		if (msg.windowKey.startsWith("fsu:") && !auth.hasOwners()) {
+		if ((msg.windowKey.startsWith("fsu:") || msg.windowKey.startsWith("dsu:")) && !auth.hasOwners()) {
 			auth.addOwner(msg.talkerId);
 			auth.audit("owner/adopted", {
-				channel: "feishu",
-				openId: msg.talkerId
+				channel: msg.windowKey.split(":")[0],
+				userId: msg.talkerId
 			});
 			manager.say(msg.windowKey, `🤖 dsh-chatops 已上线，你已被登记为管理员（${msg.talkerId}）。回复 /help 查看指令。`);
 		}
@@ -2462,6 +2709,15 @@ function apply(ctx, config) {
 		}, logger);
 		manager.register(["fsu:", "fsc:"], feishu);
 		channelsByKind.set("feishu", feishu);
+	} else if (kind === "dingtalk") {
+		const dingtalk = new DingTalkChannel(config, {
+			onMessage,
+			onLogin: () => {},
+			onLogout: () => {},
+			onScan: () => {}
+		}, logger);
+		manager.register(["dsu:", "dsc:"], dingtalk);
+		channelsByKind.set("dingtalk", dingtalk);
 	} else logger.warn(`dsh-chatops: unknown channel "${kind}", skipped`);
 	const bridge = new SessionBridge(ctx, config, manager, auth, logger);
 	bridge.start();

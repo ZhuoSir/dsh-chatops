@@ -5,6 +5,7 @@
  * messages out to the channel owning the windowKey prefix:
  *   user: / contact: / room: / filehelper / self  → wechat/ilink channels
  *   fsu: / fsc:                                    → feishu
+ *   dsu: / dsc:                                    → dingtalk
  * Channel-specific capabilities (approval cards, progress cards) are probed
  * structurally via channelFor().
  */
@@ -16,7 +17,7 @@ export interface ManagedChannel {
   readonly online: boolean
 }
 
-const PREFIXES = ['fsu:', 'fsc:', 'user:', 'contact:', 'room:', 'filehelper', 'self']
+const PREFIXES = ['dsu:', 'dsc:', 'fsu:', 'fsc:', 'user:', 'contact:', 'room:', 'filehelper', 'self']
 
 export class ChannelManager {
   private channels = new Map<string, ManagedChannel>() // prefix → channel
