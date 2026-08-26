@@ -1,8 +1,10 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { basename, extname, join, resolve, sep } from "node:path";
+import { defineTool } from "@deepseek-ai/dsh-tools";
 import Schema from "@deepseek-ai/schemastery";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createCipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 
 //#region \0rolldown/runtime.js
@@ -60,18 +62,22 @@ const Config = Schema.object({
 	push: Schema.object({
 		onSessionComplete: Schema.boolean().default(true).description("Push a summary to the bound chat window when a session turn completes."),
 		onApproval: Schema.boolean().default(true).description("Push approval requests to the bound window; answer with /approve or /reject."),
-		approvalTimeoutSec: Schema.number().default(300).description("Seconds to wait for a WeChat approval decision before falling through to other answerers (GUI).")
+		approvalTimeoutSec: Schema.number().default(300).description("Seconds to wait for a WeChat approval decision before falling through to other answerers (GUI)."),
+		longOutputAsFile: Schema.boolean().default(true).description("Send long /log output as a .txt file instead of many messages (file-capable channels).")
 	}).default({
 		onSessionComplete: true,
 		onApproval: true,
-		approvalTimeoutSec: 300
+		approvalTimeoutSec: 300,
+		longOutputAsFile: true
 	}),
 	reply: Schema.object({
 		maxChunkBytes: Schema.number().default(6e3).description("Max bytes per outbound WeChat message; longer text is split into chunks."),
-		rateLimitMs: Schema.number().default(1200).description("Minimum interval between outbound messages (plus random jitter) — anti-risk-control throttling.")
+		rateLimitMs: Schema.number().default(1200).description("Minimum interval between outbound messages (plus random jitter) — anti-risk-control throttling."),
+		maxFileMB: Schema.number().default(20).description("Max file size (MB) allowed for IM file delivery.")
 	}).default({
 		maxChunkBytes: 6e3,
-		rateLimitMs: 1200
+		rateLimitMs: 1200,
+		maxFileMB: 20
 	})
 });
 
@@ -270,6 +276,19 @@ const ILINK_APP_ID = "bot";
 const ILINK_CLIENT_VERSION = String(132102);
 const LOGIN_TIMEOUT_MS = 1e4;
 const SHORT_TIMEOUT_MS = 15e3;
+const CDN_UPLOAD_TIMEOUT_MS = 6e4;
+const CDN_UPLOAD_RETRIES = 3;
+const WEIXIN_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
+const WEIXIN_CDN_HOST = "novac2c.cdn.weixin.qq.com";
+/** AES-128-ECB (PKCS7) padded size — what iLink expects as `filesize`. */
+function aesEcbPaddedSize(size) {
+	return Math.ceil((size + 1) / 16) * 16;
+}
+function trustedCdnUrl(value) {
+	const url = new URL(value);
+	if (url.protocol !== "https:" || url.hostname !== WEIXIN_CDN_HOST) throw new ILinkError("untrusted-cdn-url", "微信返回了不受信任的 CDN 地址");
+	return url.toString();
+}
 var ILinkError = class extends Error {
 	code;
 	status;
@@ -441,6 +460,106 @@ function createILinkApi() {
 				}
 			});
 			if (response?.ret !== void 0 && response.ret !== 0) throw new ILinkError("send-rejected", "iLink 拒绝了回复消息");
+			return true;
+		},
+		/** File/image step ①: request a CDN upload slot. */
+		async getUploadUrl({ baseUrl, token, toUserId, file, mediaType, aesKey, fileKey, signal }) {
+			const response = await requestJson({
+				method: "POST",
+				baseUrl,
+				endpoint: "ilink/bot/getuploadurl",
+				token,
+				signal,
+				body: {
+					filekey: fileKey,
+					media_type: mediaType,
+					to_user_id: toUserId,
+					rawsize: file.bytes.byteLength,
+					rawfilemd5: createHash("md5").update(file.bytes).digest("hex"),
+					filesize: aesEcbPaddedSize(file.bytes.byteLength),
+					no_need_thumb: true,
+					aeskey: aesKey.toString("hex"),
+					base_info: baseInfo()
+				}
+			});
+			if (response?.ret !== void 0 && response.ret !== 0) throw new ILinkError("upload-url-rejected", `微信拒绝了文件上传请求 (ret=${response.ret})`);
+			return response;
+		},
+		/** Step ②+③: AES-128-ECB encrypt and upload to the WeChat CDN. */
+		async uploadCdn({ upload, fileKey, bytes, aesKey, signal }) {
+			let url;
+			const full = nonEmpty(upload?.upload_full_url);
+			if (full) url = trustedCdnUrl(full);
+			else {
+				const param = nonEmpty(upload?.upload_param);
+				if (!param) throw new ILinkError("missing-upload-url", "微信没有返回文件上传地址");
+				const u = new URL(`${WEIXIN_CDN_BASE_URL}/upload`);
+				u.searchParams.set("encrypted_query_param", param);
+				u.searchParams.set("filekey", fileKey);
+				url = trustedCdnUrl(u.toString());
+			}
+			const cipher = createCipheriv("aes-128-ecb", aesKey, null);
+			const ciphertext = Buffer.concat([cipher.update(bytes), cipher.final()]);
+			let lastError;
+			for (let attempt = 1; attempt <= CDN_UPLOAD_RETRIES; attempt++) try {
+				const response = await fetch(url, {
+					method: "POST",
+					headers: { "content-type": "application/octet-stream" },
+					body: new Uint8Array(ciphertext),
+					signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(CDN_UPLOAD_TIMEOUT_MS)]) : AbortSignal.timeout(CDN_UPLOAD_TIMEOUT_MS),
+					redirect: "error"
+				});
+				if (response.status !== 200) throw new ILinkError("upload-failed", `微信 CDN 上传失败（HTTP ${response.status}）`, { status: response.status });
+				const downloadParam = response.headers.get("x-encrypted-param");
+				await response.body?.cancel?.().catch(() => void 0);
+				if (!downloadParam) throw new ILinkError("missing-download-param", "CDN 未返回下载凭证");
+				return downloadParam;
+			} catch (error) {
+				lastError = error;
+			}
+			throw lastError instanceof Error ? lastError : new ILinkError("upload-failed", String(lastError));
+		},
+		/** Step ④: send the uploaded artifact as a file/image message. */
+		async sendArtifact({ baseUrl, token, toUserId, file, mediaType, downloadParam, aesKey, ciphertextSize, contextToken, signal }) {
+			const media = {
+				encrypt_query_param: downloadParam,
+				aes_key: Buffer.from(aesKey.toString("hex")).toString("base64"),
+				encrypt_type: 1
+			};
+			const item = mediaType === 1 ? {
+				type: 2,
+				image_item: {
+					media,
+					mid_size: ciphertextSize
+				}
+			} : {
+				type: 4,
+				file_item: {
+					media,
+					file_name: file.fileName,
+					len: String(file.bytes.byteLength)
+				}
+			};
+			const response = await requestJson({
+				method: "POST",
+				baseUrl,
+				endpoint: "ilink/bot/sendmessage",
+				token,
+				signal,
+				body: {
+					msg: {
+						from_user_id: "",
+						to_user_id: toUserId,
+						client_id: `dsh-chatops-${randomUUID()}`,
+						message_type: 2,
+						message_state: 2,
+						item_list: [item],
+						...nonEmpty(contextToken) ? { context_token: contextToken.trim() } : {}
+					},
+					base_info: baseInfo()
+				}
+			});
+			if (response?.ret !== void 0 && response.ret !== 0) throw new ILinkError("send-rejected", `微信拒绝了文件消息 (ret=${response.ret})`);
 			return true;
 		},
 		/** Bot-online notification, called once when the poll loop starts. */
@@ -927,6 +1046,72 @@ var ILinkChannel = class {
 		} catch (error) {
 			this.logger.warn(`dsh-chatops: send to ${windowKey} failed: ${error?.message ?? error}`);
 		}
+	}
+	/**
+	* Send a file/image as a native WeChat message (CDN upload + AES).
+	* Images (jpg/png/webp/gif) render inline; everything else arrives as a
+	* file card. Size is fenced by reply.maxFileMB before reading the file.
+	*/
+	async sendFile(windowKey, filePath, caption) {
+		if (!windowKey.startsWith("user:")) throw new Error("file send requires a private-chat window");
+		const toUserId = windowKey.slice(5);
+		const { baseUrl } = this.store.data;
+		const token = await this.store.getToken();
+		if (!baseUrl || !token) throw new Error("iLink 通道未连接");
+		const maxMB = this.config.reply?.maxFileMB ?? 20;
+		const bytes = await readFile(filePath);
+		if (bytes.byteLength > maxMB * 1024 * 1024) throw new Error(`文件超过 ${maxMB}MB 上限（${(bytes.byteLength / 1048576).toFixed(1)}MB）`);
+		const fileName = basename(filePath);
+		const isImage = [
+			".jpg",
+			".jpeg",
+			".png",
+			".webp",
+			".gif"
+		].includes(extname(fileName).toLowerCase());
+		this.bulkQueue = this.bulkQueue.then(async () => {
+			try {
+				const aesKey = randomBytes(16);
+				const fileKey = randomBytes(16).toString("hex");
+				const file = {
+					fileName,
+					bytes
+				};
+				const upload = await this.api.getUploadUrl({
+					baseUrl,
+					token,
+					toUserId,
+					file,
+					mediaType: isImage ? 1 : 3,
+					aesKey,
+					fileKey
+				});
+				const downloadParam = await this.api.uploadCdn({
+					upload,
+					fileKey,
+					bytes,
+					aesKey
+				});
+				const ciphertextSize = Math.ceil((bytes.byteLength + 1) / 16) * 16;
+				await this.api.sendArtifact({
+					baseUrl,
+					token,
+					toUserId,
+					file,
+					mediaType: isImage ? 1 : 3,
+					downloadParam,
+					aesKey,
+					ciphertextSize,
+					contextToken: this.contextTokens.get(windowKey)
+				});
+				if (caption) await this.say(windowKey, caption);
+				this.dbg(`file sent to ${toUserId}: ${fileName} (${bytes.byteLength}B, ${isImage ? "image" : "file"})`);
+			} catch (error) {
+				this.logger.warn(`dsh-chatops: 文件发送失败 ${fileName}: ${error?.message ?? error}`);
+				await this.say(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`);
+			}
+		});
+		return this.bulkQueue;
 	}
 	async throttle(min, jitter) {
 		const wait = this.lastSentAt + min + Math.floor(Math.random() * jitter) - Date.now();
@@ -1540,6 +1725,8 @@ var AuthStore = class {
 const LOG_RING_SIZE = 50;
 /** Max chars /log will emit in one go (≈8 WeChat messages after chunking). */
 const LOG_TOTAL_CAP = 12e3;
+/** /log output longer than this is sent as a .txt file (file-capable channels). */
+const LONG_OUTPUT_FILE_THRESHOLD = 4e3;
 var SessionBridge = class {
 	ctx;
 	config;
@@ -1845,8 +2032,18 @@ var SessionBridge = class {
 		});
 		if (text.startsWith("/")) {
 			const reply = await this.runCommand(msg, text);
-			const bulk = text.split(/\s+/)[0] === "/log";
-			if (reply) await this.channel.say(msg.windowKey, reply, { bulk });
+			const cmd = text.split(/\s+/)[0];
+			if (cmd === "/log" && reply && reply.length > LONG_OUTPUT_FILE_THRESHOLD && this.config.push?.longOutputAsFile !== false) {
+				const channel = this.channel.channelFor?.(msg.windowKey) ?? null;
+				if (typeof channel?.sendFile === "function") {
+					const dir = mkdtempSync(join(tmpdir(), "dsh-chatops-"));
+					const file = join(dir, `session-log-${Date.now()}.txt`);
+					writeFileSync(file, reply);
+					await channel.sendFile(msg.windowKey, file, "📄 输出较长，已转为文件发送");
+					return;
+				}
+			}
+			if (reply) await this.channel.say(msg.windowKey, reply, { bulk: cmd === "/log" });
 			return;
 		}
 		await this.forwardPrompt(msg, text);
@@ -1861,6 +2058,7 @@ var SessionBridge = class {
 			case "/bind": return this.showBinding(msg.windowKey);
 			case "/status": return this.showStatus(msg.windowKey);
 			case "/log": return this.showLog(msg.windowKey, Number.parseInt(arg, 10) || 3);
+			case "/send": return await this.sendFileCommand(msg.windowKey, arg);
 			case "/approve": return this.decideApproval(msg.windowKey, "allowed-once");
 			case "/reject": return this.decideApproval(msg.windowKey, "rejected");
 			case "/stop": return "⏳ /stop 尚未接入：中断 API 待确认（GUI 侧 interrupt 路径）。";
@@ -1957,6 +2155,61 @@ var SessionBridge = class {
 		pending.resolve(outcome);
 		return outcome === "allowed-once" ? "✅ 已批准，继续执行。" : "❌ 已拒绝。";
 	}
+	/** /send <path>: push a workspace file to the bound IM window. */
+	async sendFileCommand(windowKey, arg) {
+		if (!arg) return "用法：/send <工作区内文件路径>（如 /send reports/weekly.md）";
+		const sessionId = this.auth.getBinding(windowKey)?.sessionId;
+		if (!sessionId) return "未绑定会话。回复 /sessions + /use <编号> 先绑定。";
+		const resolved = this.resolveWorkspaceFile(sessionId, arg);
+		if ("error" in resolved) return resolved.error;
+		return await this.sendFileToWindow(windowKey, resolved.path, `📎 ${basename(resolved.path)}`) ? `📤 文件「${basename(resolved.path)}」发送中…` : "当前通道不支持文件发送（微信 ilink 通道支持；wechaty 通道暂不支持）。";
+	}
+	/**
+	* Tool entry: the model calls im_send_file inside a session; the file goes
+	* to every IM window bound to THAT session (never to a stranger's window).
+	*/
+	async sendFileForSession(sessionId, relPath, caption) {
+		const resolved = this.resolveWorkspaceFile(sessionId, relPath);
+		if ("error" in resolved) return `发送失败：${resolved.error}`;
+		const windows = this.auth.windowsForSession(sessionId);
+		if (windows.length === 0) return "发送失败：该会话没有绑定任何 IM 窗口（在微信/飞书里 /use 绑定后再试）。";
+		let sent = 0;
+		for (const windowKey of windows) if (await this.sendFileToWindow(windowKey, resolved.path, caption ?? `📎 ${basename(resolved.path)}`)) sent++;
+		this.auth.audit("file/send", {
+			sessionId,
+			path: resolved.path,
+			windows,
+			sent
+		});
+		return sent > 0 ? `文件「${basename(resolved.path)}」已发送到 ${sent} 个 IM 窗口。` : "发送失败：绑定的通道不支持文件发送。";
+	}
+	/** Resolve relPath inside the session workspace; refuse escapes. */
+	resolveWorkspaceFile(sessionId, relPath) {
+		const cwd = this.liveAgentOf(sessionId)?.session?.header?.cwd;
+		if (!cwd) return { error: "会话未加载，无法确定工作区。请 /use 重新绑定（📦会话会自动唤醒）。" };
+		const abs = resolve(cwd, relPath);
+		if (abs !== cwd && !abs.startsWith(cwd + sep)) {
+			this.auth.audit("file/escape-blocked", {
+				sessionId,
+				relPath
+			});
+			return { error: "只允许发送当前会话工作区内的文件。" };
+		}
+		if (!existsSync(abs)) return { error: `文件不存在：${relPath}` };
+		try {
+			if (!statSync(abs).isFile()) return { error: `不是文件：${relPath}` };
+		} catch {
+			return { error: `无法读取：${relPath}` };
+		}
+		return { path: abs };
+	}
+	/** Send via the channel owning this window, when it supports file send. */
+	async sendFileToWindow(windowKey, path, caption) {
+		const channel = this.channel.channelFor?.(windowKey) ?? null;
+		if (typeof channel?.sendFile !== "function") return false;
+		await channel.sendFile(windowKey, path, caption);
+		return true;
+	}
 	async forwardPrompt(msg, text) {
 		const windowKey = msg.windowKey;
 		let sessionId = this.auth.getBinding(windowKey)?.sessionId;
@@ -2014,6 +2267,7 @@ const HELP_TEXT = `🤖 dsh-chatops 指令：
 /status — 会话运行状态
 /log [n] — 最近 n 条完整输出
 /approve /reject — 审批
+/send <路径> — 回传工作区文件
 直接发送其他文字 = 作为 prompt 发给绑定会话`;
 function shortId(id) {
 	const text = typeof id === "string" ? id : "?";
@@ -2067,7 +2321,8 @@ const name = "dsh-chatops";
 const inject = [
 	"agents",
 	"sessionQuery",
-	"sessionTitle"
+	"sessionTitle",
+	"tools"
 ];
 function apply(ctx, config) {
 	const logger = ctx.logger;
@@ -2151,6 +2406,33 @@ function apply(ctx, config) {
 	} else logger.warn(`dsh-chatops: unknown channel "${kind}", skipped`);
 	const bridge = new SessionBridge(ctx, config, manager, auth, logger);
 	bridge.start();
+	ctx.tools.register(defineTool({
+		name: "im_send_file",
+		description: "Send a file from the current session workspace to the IM windows (WeChat/Feishu) bound to this session. Use when the user asks to receive a generated file (report, chart, csv, image) in their IM. The path must be inside the session workspace. Images (jpg/png/webp/gif) render inline; other files arrive as file cards.",
+		parameters: {
+			path: {
+				type: "string",
+				required: true,
+				description: "Workspace-relative file path, e.g. reports/weekly.md."
+			},
+			caption: {
+				type: "string",
+				description: "Optional short message sent alongside the file."
+			}
+		},
+		output: {
+			schema: { type: "string" },
+			render: (_args, value) => [{
+				type: "text",
+				text: String(value)
+			}]
+		},
+		async execute(args, exec) {
+			const sessionId = exec?.agent?.session?.id;
+			if (!sessionId) return "无法确定当前会话，文件未发送。";
+			return bridge.sendFileForSession(sessionId, String(args?.path ?? ""), args?.caption);
+		}
+	}));
 	ctx.effect(() => {
 		for (const channel of manager.all()) channel.start().catch((error) => logger.warn(`dsh-chatops: channel start failed: ${error?.message ?? error}`));
 		return () => {

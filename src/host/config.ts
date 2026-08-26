@@ -57,10 +57,14 @@ export const Config = Schema.object({
     approvalTimeoutSec: Schema.number()
       .default(300)
       .description('Seconds to wait for a WeChat approval decision before falling through to other answerers (GUI).'),
+    longOutputAsFile: Schema.boolean()
+      .default(true)
+      .description('Send long /log output as a .txt file instead of many messages (file-capable channels).'),
   }).default({
     onSessionComplete: true,
     onApproval: true,
     approvalTimeoutSec: 300,
+    longOutputAsFile: true,
   }),
   reply: Schema.object({
     maxChunkBytes: Schema.number()
@@ -69,8 +73,12 @@ export const Config = Schema.object({
     rateLimitMs: Schema.number()
       .default(1200)
       .description('Minimum interval between outbound messages (plus random jitter) — anti-risk-control throttling.'),
+    maxFileMB: Schema.number()
+      .default(20)
+      .description('Max file size (MB) allowed for IM file delivery.'),
   }).default({
     maxChunkBytes: 6000,
     rateLimitMs: 1200,
+    maxFileMB: 20,
   }),
 })

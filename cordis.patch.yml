@@ -47,8 +47,12 @@
           onApproval: true
           # 审批等待超时（秒），超时后放行给其他 answerer（如 GUI）。
           approvalTimeoutSec: 300
+          # /log 超长输出转为 txt 文件发送（通道支持时），避免刷屏。
+          longOutputAsFile: true
         reply:
           # 单条微信消息最大字节数，超长自动分段。
           maxChunkBytes: 6000
           # 发送节流：两条消息之间的最小间隔（毫秒，附加随机抖动），防风控。
           rateLimitMs: 1200
+          # 文件回传大小上限（MB）。
+          maxFileMB: 20

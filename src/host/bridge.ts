@@ -15,7 +15,10 @@
  */
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { statSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { InboundMessage } from './channel'
@@ -31,6 +34,8 @@ export interface BridgeChannel {
 const LOG_RING_SIZE = 50
 /** Max chars /log will emit in one go (≈8 WeChat messages after chunking). */
 const LOG_TOTAL_CAP = 12_000
+/** /log output longer than this is sent as a .txt file (file-capable channels). */
+const LONG_OUTPUT_FILE_THRESHOLD = 4_000
 
 interface PendingApproval {
   id: string
@@ -386,9 +391,21 @@ export class SessionBridge {
     if (text.startsWith('/')) {
       const reply = await this.runCommand(msg, text)
       // /log dumps are bulk traffic: they must not stall interactive replies
-      // behind the anti-flood throttle (and vice versa).
-      const bulk = text.split(/\s+/)[0] === '/log'
-      if (reply) await this.channel.say(msg.windowKey, reply, { bulk })
+      // behind the anti-flood throttle (and vice versa). Long dumps go out as
+      // a .txt FILE when the channel supports it — no message flooding.
+      const cmd = text.split(/\s+/)[0]
+      if (cmd === '/log' && reply && reply.length > LONG_OUTPUT_FILE_THRESHOLD
+          && this.config.push?.longOutputAsFile !== false) {
+        const channel: any = (this.channel as any).channelFor?.(msg.windowKey) ?? null
+        if (typeof channel?.sendFile === 'function') {
+          const dir = mkdtempSync(join(tmpdir(), 'dsh-chatops-'))
+          const file = join(dir, `session-log-${Date.now()}.txt`)
+          writeFileSync(file, reply)
+          await channel.sendFile(msg.windowKey, file, '📄 输出较长，已转为文件发送')
+          return
+        }
+      }
+      if (reply) await this.channel.say(msg.windowKey, reply, { bulk: cmd === '/log' })
       return
     }
     await this.forwardPrompt(msg, text)
@@ -410,6 +427,8 @@ export class SessionBridge {
         return this.showStatus(msg.windowKey)
       case '/log':
         return this.showLog(msg.windowKey, Number.parseInt(arg, 10) || 3)
+      case '/send':
+        return await this.sendFileCommand(msg.windowKey, arg)
       case '/approve':
         return this.decideApproval(msg.windowKey, 'allowed-once')
       case '/reject':
@@ -537,6 +556,74 @@ export class SessionBridge {
     return outcome === 'allowed-once' ? '✅ 已批准，继续执行。' : '❌ 已拒绝。'
   }
 
+  // ----------------------------------------------------------- file send ---
+
+  /** /send <path>: push a workspace file to the bound IM window. */
+  private async sendFileCommand(windowKey: string, arg: string): Promise<string> {
+    if (!arg) return '用法：/send <工作区内文件路径>（如 /send reports/weekly.md）'
+    const sessionId = this.auth.getBinding(windowKey)?.sessionId
+    if (!sessionId) return '未绑定会话。回复 /sessions + /use <编号> 先绑定。'
+    const resolved = this.resolveWorkspaceFile(sessionId, arg)
+    if ('error' in resolved) return resolved.error
+    const ok = await this.sendFileToWindow(windowKey, resolved.path, `📎 ${basename(resolved.path)}`)
+    return ok
+      ? `📤 文件「${basename(resolved.path)}」发送中…`
+      : '当前通道不支持文件发送（微信 ilink 通道支持；wechaty 通道暂不支持）。'
+  }
+
+  /**
+   * Tool entry: the model calls im_send_file inside a session; the file goes
+   * to every IM window bound to THAT session (never to a stranger's window).
+   */
+  async sendFileForSession(sessionId: string, relPath: string, caption?: string): Promise<string> {
+    const resolved = this.resolveWorkspaceFile(sessionId, relPath)
+    if ('error' in resolved) return `发送失败：${resolved.error}`
+    const windows = this.auth.windowsForSession(sessionId)
+    if (windows.length === 0) {
+      return '发送失败：该会话没有绑定任何 IM 窗口（在微信/飞书里 /use 绑定后再试）。'
+    }
+    let sent = 0
+    for (const windowKey of windows) {
+      if (await this.sendFileToWindow(windowKey, resolved.path, caption ?? `📎 ${basename(resolved.path)}`)) sent++
+    }
+    this.auth.audit('file/send', {
+      sessionId,
+      path: resolved.path,
+      windows,
+      sent,
+    })
+    return sent > 0
+      ? `文件「${basename(resolved.path)}」已发送到 ${sent} 个 IM 窗口。`
+      : '发送失败：绑定的通道不支持文件发送。'
+  }
+
+  /** Resolve relPath inside the session workspace; refuse escapes. */
+  private resolveWorkspaceFile(sessionId: string, relPath: string): { path: string } | { error: string } {
+    const agent = this.liveAgentOf(sessionId)
+    const cwd = agent?.session?.header?.cwd
+    if (!cwd) return { error: '会话未加载，无法确定工作区。请 /use 重新绑定（📦会话会自动唤醒）。' }
+    const abs = resolve(cwd, relPath)
+    if (abs !== cwd && !abs.startsWith(cwd + sep)) {
+      this.auth.audit('file/escape-blocked', { sessionId, relPath })
+      return { error: '只允许发送当前会话工作区内的文件。' }
+    }
+    if (!existsSync(abs)) return { error: `文件不存在：${relPath}` }
+    try {
+      if (!statSync(abs).isFile()) return { error: `不是文件：${relPath}` }
+    } catch {
+      return { error: `无法读取：${relPath}` }
+    }
+    return { path: abs }
+  }
+
+  /** Send via the channel owning this window, when it supports file send. */
+  private async sendFileToWindow(windowKey: string, path: string, caption?: string): Promise<boolean> {
+    const channel: any = (this.channel as any).channelFor?.(windowKey) ?? null
+    if (typeof channel?.sendFile !== 'function') return false
+    await channel.sendFile(windowKey, path, caption)
+    return true
+  }
+
   // --------------------------------------------------------------- prompt ---
 
   private async forwardPrompt(msg: InboundMessage, text: string): Promise<void> {
@@ -603,6 +690,7 @@ export const HELP_TEXT = `🤖 dsh-chatops 指令：
 /status — 会话运行状态
 /log [n] — 最近 n 条完整输出
 /approve /reject — 审批
+/send <路径> — 回传工作区文件
 直接发送其他文字 = 作为 prompt 发给绑定会话`
 
 // ------------------------------------------------------------------ helpers --

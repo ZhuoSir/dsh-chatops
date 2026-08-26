@@ -7,7 +7,7 @@
  * Flow: beginLogin → pollLogin(wait→scaned→confirmed) → {bot_token, baseurl}
  *       → getUpdates long-poll (cursor: get_updates_buf) → sendmessage.
  */
-import { randomBytes, randomUUID } from 'node:crypto'
+import { createCipheriv, createHash, randomBytes, randomUUID } from 'node:crypto'
 
 export const ILINK_QR_BASE_URL = 'https://ilinkai.weixin.qq.com/'
 export const ILINK_PROTOCOL_VERSION = '2.4.6'
@@ -18,6 +18,23 @@ const ILINK_CLIENT_VERSION = String((2 << 16) | (4 << 8) | 6)
 const LOGIN_TIMEOUT_MS = 10_000
 const LONG_POLL_TIMEOUT_MS = 35_000
 const SHORT_TIMEOUT_MS = 15_000
+const CDN_UPLOAD_TIMEOUT_MS = 60_000
+const CDN_UPLOAD_RETRIES = 3
+const WEIXIN_CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c'
+const WEIXIN_CDN_HOST = 'novac2c.cdn.weixin.qq.com'
+
+/** AES-128-ECB (PKCS7) padded size — what iLink expects as `filesize`. */
+function aesEcbPaddedSize(size: number): number {
+  return Math.ceil((size + 1) / 16) * 16
+}
+
+function trustedCdnUrl(value: string): string {
+  const url = new URL(value)
+  if (url.protocol !== 'https:' || url.hostname !== WEIXIN_CDN_HOST) {
+    throw new ILinkError('untrusted-cdn-url', '微信返回了不受信任的 CDN 地址')
+  }
+  return url.toString()
+}
 
 /** Login statuses returned by get_qrcode_status. */
 export type LoginStatus =
@@ -265,6 +282,136 @@ export function createILinkApi() {
       })
       if (response?.ret !== undefined && response.ret !== 0) {
         throw new ILinkError('send-rejected', 'iLink 拒绝了回复消息')
+      }
+      return true
+    },
+
+    /** File/image step ①: request a CDN upload slot. */
+    async getUploadUrl({ baseUrl, token, toUserId, file, mediaType, aesKey, fileKey, signal }: {
+      baseUrl: string
+      token: string
+      toUserId: string
+      file: { fileName: string; bytes: Buffer }
+      mediaType: 1 | 3 // 1=image, 3=file
+      aesKey: Buffer
+      fileKey: string
+      signal?: AbortSignal
+    }) {
+      const response = await requestJson({
+        method: 'POST',
+        baseUrl,
+        endpoint: 'ilink/bot/getuploadurl',
+        token,
+        signal,
+        body: {
+          filekey: fileKey,
+          media_type: mediaType,
+          to_user_id: toUserId,
+          rawsize: file.bytes.byteLength,
+          rawfilemd5: createHash('md5').update(file.bytes).digest('hex'),
+          filesize: aesEcbPaddedSize(file.bytes.byteLength),
+          no_need_thumb: true,
+          aeskey: aesKey.toString('hex'),
+          base_info: baseInfo(),
+        },
+      })
+      if (response?.ret !== undefined && response.ret !== 0) {
+        throw new ILinkError('upload-url-rejected', `微信拒绝了文件上传请求 (ret=${response.ret})`)
+      }
+      return response
+    },
+
+    /** Step ②+③: AES-128-ECB encrypt and upload to the WeChat CDN. */
+    async uploadCdn({ upload, fileKey, bytes, aesKey, signal }: {
+      upload: any
+      fileKey: string
+      bytes: Buffer
+      aesKey: Buffer
+      signal?: AbortSignal
+    }): Promise<string> {
+      let url: string
+      const full = nonEmpty(upload?.upload_full_url)
+      if (full) {
+        url = trustedCdnUrl(full)
+      } else {
+        const param = nonEmpty(upload?.upload_param)
+        if (!param) throw new ILinkError('missing-upload-url', '微信没有返回文件上传地址')
+        const u = new URL(`${WEIXIN_CDN_BASE_URL}/upload`)
+        u.searchParams.set('encrypted_query_param', param)
+        u.searchParams.set('filekey', fileKey)
+        url = trustedCdnUrl(u.toString())
+      }
+      const cipher = createCipheriv('aes-128-ecb', aesKey, null)
+      const ciphertext = Buffer.concat([cipher.update(bytes), cipher.final()])
+
+      let lastError: unknown
+      for (let attempt = 1; attempt <= CDN_UPLOAD_RETRIES; attempt++) {
+        try {
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/octet-stream' },
+            body: new Uint8Array(ciphertext),
+            signal: signal
+              ? AbortSignal.any([signal, AbortSignal.timeout(CDN_UPLOAD_TIMEOUT_MS)])
+              : AbortSignal.timeout(CDN_UPLOAD_TIMEOUT_MS),
+            redirect: 'error',
+          })
+          if (response.status !== 200) {
+            throw new ILinkError('upload-failed', `微信 CDN 上传失败（HTTP ${response.status}）`, { status: response.status })
+          }
+          const downloadParam = response.headers.get('x-encrypted-param')
+          await response.body?.cancel?.().catch(() => undefined)
+          if (!downloadParam) throw new ILinkError('missing-download-param', 'CDN 未返回下载凭证')
+          return downloadParam
+        } catch (error) {
+          lastError = error
+        }
+      }
+      throw lastError instanceof Error ? lastError : new ILinkError('upload-failed', String(lastError))
+    },
+
+    /** Step ④: send the uploaded artifact as a file/image message. */
+    async sendArtifact({ baseUrl, token, toUserId, file, mediaType, downloadParam, aesKey, ciphertextSize, contextToken, signal }: {
+      baseUrl: string
+      token: string
+      toUserId: string
+      file: { fileName: string; bytes: Buffer }
+      mediaType: 1 | 3
+      downloadParam: string
+      aesKey: Buffer
+      ciphertextSize: number
+      contextToken?: string
+      signal?: AbortSignal
+    }) {
+      const media = {
+        encrypt_query_param: downloadParam,
+        aes_key: Buffer.from(aesKey.toString('hex')).toString('base64'),
+        encrypt_type: 1,
+      }
+      const item = mediaType === 1
+        ? { type: 2, image_item: { media, mid_size: ciphertextSize } }
+        : { type: 4, file_item: { media, file_name: file.fileName, len: String(file.bytes.byteLength) } }
+      const response = await requestJson({
+        method: 'POST',
+        baseUrl,
+        endpoint: 'ilink/bot/sendmessage',
+        token,
+        signal,
+        body: {
+          msg: {
+            from_user_id: '',
+            to_user_id: toUserId,
+            client_id: `dsh-chatops-${randomUUID()}`,
+            message_type: 2,
+            message_state: 2,
+            item_list: [item],
+            ...(nonEmpty(contextToken) ? { context_token: contextToken!.trim() } : {}),
+          },
+          base_info: baseInfo(),
+        },
+      })
+      if (response?.ret !== undefined && response.ret !== 0) {
+        throw new ILinkError('send-rejected', `微信拒绝了文件消息 (ret=${response.ret})`)
       }
       return true
     },

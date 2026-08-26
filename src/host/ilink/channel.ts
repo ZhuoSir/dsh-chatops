@@ -12,6 +12,9 @@
 import { homedir } from 'node:os'
 import { appendFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { randomBytes } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+import { basename, extname } from 'node:path'
 import { createILinkApi, extractText, messageId, ILinkError, type ILinkApi } from './api'
 import { ILinkStore } from './store'
 import { chunkText } from '../channel'
@@ -368,6 +371,52 @@ export class ILinkChannel {
     } catch (error: any) {
       this.logger.warn(`dsh-chatops: send to ${windowKey} failed: ${error?.message ?? error}`)
     }
+  }
+
+  /**
+   * Send a file/image as a native WeChat message (CDN upload + AES).
+   * Images (jpg/png/webp/gif) render inline; everything else arrives as a
+   * file card. Size is fenced by reply.maxFileMB before reading the file.
+   */
+  async sendFile(windowKey: string, filePath: string, caption?: string): Promise<void> {
+    if (!windowKey.startsWith('user:')) throw new Error('file send requires a private-chat window')
+    const toUserId = windowKey.slice('user:'.length)
+    const { baseUrl } = this.store.data
+    const token = await this.store.getToken()
+    if (!baseUrl || !token) throw new Error('iLink 通道未连接')
+
+    const maxMB = this.config.reply?.maxFileMB ?? 20
+    const bytes = await readFile(filePath)
+    if (bytes.byteLength > maxMB * 1024 * 1024) {
+      throw new Error(`文件超过 ${maxMB}MB 上限（${(bytes.byteLength / 1048576).toFixed(1)}MB）`)
+    }
+    const fileName = basename(filePath)
+    const isImage = ['.jpg', '.jpeg', '.png', '.webp', '.gif'].includes(extname(fileName).toLowerCase())
+
+    this.bulkQueue = this.bulkQueue.then(async () => {
+      try {
+        const aesKey = randomBytes(16)
+        const fileKey = randomBytes(16).toString('hex')
+        const file = { fileName, bytes }
+        const upload = await this.api.getUploadUrl({
+          baseUrl, token, toUserId, file, mediaType: isImage ? 1 : 3, aesKey, fileKey,
+        })
+        const downloadParam = await this.api.uploadCdn({ upload, fileKey, bytes, aesKey })
+        const ciphertextSize = Math.ceil((bytes.byteLength + 1) / 16) * 16
+        await this.api.sendArtifact({
+          baseUrl, token, toUserId, file,
+          mediaType: isImage ? 1 : 3,
+          downloadParam, aesKey, ciphertextSize,
+          contextToken: this.contextTokens.get(windowKey),
+        })
+        if (caption) await this.say(windowKey, caption)
+        this.dbg(`file sent to ${toUserId}: ${fileName} (${bytes.byteLength}B, ${isImage ? 'image' : 'file'})`)
+      } catch (error: any) {
+        this.logger.warn(`dsh-chatops: 文件发送失败 ${fileName}: ${error?.message ?? error}`)
+        await this.say(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`)
+      }
+    })
+    return this.bulkQueue
   }
 
   private async throttle(min: number, jitter: number): Promise<void> {

@@ -12,6 +12,7 @@
 import { existsSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import { Config } from './config'
 import { WechatChannel } from './channel'
 import { ILinkChannel } from './ilink/channel'
@@ -28,7 +29,7 @@ export const name = 'dsh-chatops'
 // sessionQuery: list + read titles of persisted (cold) sessions — cordis 拦截
 // 未声明的服务访问（返回 undefined），所以必须在这里显式声明，否则 /sessions
 // 只能看到已加载的活会话。sessionTitle: live 会话的折叠标题。
-export const inject = ['agents', 'sessionQuery', 'sessionTitle']
+export const inject = ['agents', 'sessionQuery', 'sessionTitle', 'tools']
 
 export { Config }
 
@@ -124,6 +125,29 @@ export function apply(ctx: any, config: any) {
 
   const bridge = new SessionBridge(ctx, config, manager, auth, logger)
   bridge.start()
+
+  // Model-initiated file delivery: the agent calls im_send_file inside a
+  // session; the file goes to every IM window bound to THAT session.
+  ctx.tools.register(defineTool({
+    name: 'im_send_file',
+    description:
+      'Send a file from the current session workspace to the IM windows (WeChat/Feishu) bound to this session. ' +
+      'Use when the user asks to receive a generated file (report, chart, csv, image) in their IM. ' +
+      'The path must be inside the session workspace. Images (jpg/png/webp/gif) render inline; other files arrive as file cards.',
+    parameters: {
+      path: { type: 'string', required: true, description: 'Workspace-relative file path, e.g. reports/weekly.md.' },
+      caption: { type: 'string', description: 'Optional short message sent alongside the file.' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
+    },
+    async execute(args: any, exec: any) {
+      const sessionId = exec?.agent?.session?.id
+      if (!sessionId) return '无法确定当前会话，文件未发送。'
+      return bridge.sendFileForSession(sessionId, String(args?.path ?? ''), args?.caption)
+    },
+  }))
 
   ctx.effect(() => {
     for (const channel of manager.all()) {
