@@ -568,7 +568,7 @@ export class SessionBridge {
     const ok = await this.sendFileToWindow(windowKey, resolved.path, `📎 ${basename(resolved.path)}`)
     return ok
       ? `📤 文件「${basename(resolved.path)}」发送中…`
-      : '当前通道不支持文件发送（微信 ilink 通道支持；wechaty 通道暂不支持）。'
+      : '当前通道不支持文件发送（微信 ilink / 飞书支持；wechaty 通道暂不支持）。'
   }
 
   /**

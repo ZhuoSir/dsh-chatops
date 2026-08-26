@@ -19,7 +19,7 @@
 - 🚀 普通文字直接作为 prompt 发给绑定会话（首次自动绑定最近活跃会话）
 - 🃏 飞书专属：审批发**交互卡片**（点【批准】【拒绝】按钮，卡片原地变终态）；任务发**进度卡**，完成后原地更新为结果
 - 🔐 微信 bot_token 存 DSH 凭据存储；owner/白名单模型，陌生人消息静默忽略 + 审计
-- 📎 文件回传：模型调用 `im_send_file` 工具主动把成果文件发到你微信（图片直接显示，其他为文件卡片）；`/send <路径>` 手动回传；`/log` 超长输出自动转 txt 文件
+- 📎 文件回传（微信+飞书）：模型调用 `im_send_file` 工具主动把成果文件发到 IM（图片直接显示，其他为文件卡片）；`/send <路径>` 手动回传；`/log` 超长输出自动转 txt 文件
 - 🛡 微信发送双通道队列（交互消息优先，长输出不堵回执）；掉线自动重连；全量审计日志
 
 ## 安装
@@ -53,7 +53,7 @@ dsh plugin --profile web add /path/to/dsh-chatops
 ## 使用（feishu 通道）
 
 1. [飞书开发者后台](https://open.feishu.cn/app)创建**企业自建应用** → 添加**机器人**能力（没有租户可免费创建团队）；
-2. 权限：`im:message`、`im:message:send_as_bot`（图片/文件再加 `im:resource`）；
+2. 权限：`im:message`、`im:message:send_as_bot`、`im:resource`（文件/图片回传必需）；
 3. 事件订阅：订阅方式选**使用长连接接收事件**，添加 `接收消息 im.message.receive_v1` 和 `卡片回传交互 card.action.trigger`（审批按钮必须）；
 4. 创建版本并发布（自用可用范围选自己）；
 5. 配置 `channels: [ilink, feishu]` + `feishu.appId/appSecret`，重启 `dsh web`；

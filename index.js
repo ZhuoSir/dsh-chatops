@@ -1,10 +1,10 @@
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, extname, join, resolve, sep } from "node:path";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import Schema from "@deepseek-ai/schemastery";
 import { createCipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 
 //#region \0rolldown/runtime.js
@@ -1322,6 +1322,18 @@ function escapeMd(text) {
 
 //#endregion
 //#region src/host/feishu/channel.ts
+/**
+* FeishuChannel: 飞书自建应用机器人通道（官方开放平台，lark-oapi SDK）。
+*
+* - 收消息：WSClient WebSocket 长连接 + EventDispatcher（无需公网回调）；
+*   事件 im.message.receive_v1（私聊直接响应 / 群聊需 @机器人）。
+* - 发消息：im.message.create REST；单队列轻节流（300ms，API 配额宽裕）。
+* - 审批：交互卡片 + card.action.trigger 按钮回调（decision 路由到 bridge）。
+* - 进度：任务状态卡原地更新（create → patch）。
+*
+* windowKey 命名：`fsu:{open_id}` 私聊，`fsc:{chat_id}` 群聊。
+* SDK 是可选依赖：未安装时插件照常加载并给出安装指引。
+*/
 const SEND_INTERVAL_MS = 300;
 var FeishuChannel = class {
 	config;
@@ -1523,6 +1535,53 @@ var FeishuChannel = class {
 		} catch (error) {
 			this.logger.warn(`dsh-chatops: 进度卡更新失败: ${error?.message ?? error}`);
 		}
+	}
+	/**
+	* Send a workspace file/image as a native Feishu message.
+	* Images (jpg/png/webp/gif) upload via im.image.create and render inline;
+	* everything else uploads via im.file.create and arrives as a file card.
+	* Requires the app scope `im:resource` (读取与上传图片或文件资源).
+	*/
+	async sendFile(windowKey, filePath, caption) {
+		if (!this.client) throw new Error("飞书通道未连接");
+		const maxMB = this.config.reply?.maxFileMB ?? 100;
+		const info = await stat(filePath);
+		if (info.size > maxMB * 1024 * 1024) throw new Error(`文件超过 ${maxMB}MB 上限（${(info.size / 1048576).toFixed(1)}MB）`);
+		const fileName = basename(filePath);
+		const isImage = [
+			".jpg",
+			".jpeg",
+			".png",
+			".webp",
+			".gif"
+		].includes(extname(fileName).toLowerCase());
+		this.outQueue = this.outQueue.then(async () => {
+			try {
+				if (isImage) {
+					const up = await this.client.im.image.create({ data: {
+						image_type: "message",
+						image: createReadStream(filePath)
+					} });
+					const imageKey = up?.data?.image_key ?? up?.image_key;
+					if (!imageKey) throw new Error(`图片上传被拒: ${up?.msg ?? "no image_key"}`);
+					await this.sendMessage(windowKey, "image", JSON.stringify({ image_key: imageKey }));
+				} else {
+					const up = await this.client.im.file.create({ data: {
+						file_type: "stream",
+						file_name: fileName,
+						file: createReadStream(filePath)
+					} });
+					const fileKey = up?.data?.file_key ?? up?.file_key;
+					if (!fileKey) throw new Error(`文件上传被拒: ${up?.msg ?? "no file_key"}`);
+					await this.sendMessage(windowKey, "file", JSON.stringify({ file_key: fileKey }));
+				}
+				if (caption) await this.say(windowKey, caption);
+			} catch (error) {
+				this.logger.warn(`dsh-chatops: 飞书文件发送失败 ${fileName}: ${error?.message ?? error}`);
+				await this.say(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`);
+			}
+		});
+		return this.outQueue;
 	}
 	/** Returns the created message id when available. */
 	async sendMessage(windowKey, msgType, content) {
@@ -2162,7 +2221,7 @@ var SessionBridge = class {
 		if (!sessionId) return "未绑定会话。回复 /sessions + /use <编号> 先绑定。";
 		const resolved = this.resolveWorkspaceFile(sessionId, arg);
 		if ("error" in resolved) return resolved.error;
-		return await this.sendFileToWindow(windowKey, resolved.path, `📎 ${basename(resolved.path)}`) ? `📤 文件「${basename(resolved.path)}」发送中…` : "当前通道不支持文件发送（微信 ilink 通道支持；wechaty 通道暂不支持）。";
+		return await this.sendFileToWindow(windowKey, resolved.path, `📎 ${basename(resolved.path)}`) ? `📤 文件「${basename(resolved.path)}」发送中…` : "当前通道不支持文件发送（微信 ilink / 飞书支持；wechaty 通道暂不支持）。";
 	}
 	/**
 	* Tool entry: the model calls im_send_file inside a session; the file goes

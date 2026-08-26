@@ -10,6 +10,9 @@
  * windowKey 命名：`fsu:{open_id}` 私聊，`fsc:{chat_id}` 群聊。
  * SDK 是可选依赖：未安装时插件照常加载并给出安装指引。
  */
+import { createReadStream } from 'node:fs'
+import { stat } from 'node:fs/promises'
+import { basename, extname } from 'node:path'
 import type { ChannelEvents, InboundMessage } from '../channel'
 import { chunkText } from '../channel'
 import {
@@ -263,6 +266,48 @@ export class FeishuChannel {
     } catch (error: any) {
       this.logger.warn(`dsh-chatops: 进度卡更新失败: ${error?.message ?? error}`)
     }
+  }
+
+  /**
+   * Send a workspace file/image as a native Feishu message.
+   * Images (jpg/png/webp/gif) upload via im.image.create and render inline;
+   * everything else uploads via im.file.create and arrives as a file card.
+   * Requires the app scope `im:resource` (读取与上传图片或文件资源).
+   */
+  async sendFile(windowKey: string, filePath: string, caption?: string): Promise<void> {
+    if (!this.client) throw new Error('飞书通道未连接')
+    const maxMB = this.config.reply?.maxFileMB ?? 100
+    const info = await stat(filePath)
+    if (info.size > maxMB * 1024 * 1024) {
+      throw new Error(`文件超过 ${maxMB}MB 上限（${(info.size / 1048576).toFixed(1)}MB）`)
+    }
+    const fileName = basename(filePath)
+    const isImage = ['.jpg', '.jpeg', '.png', '.webp', '.gif'].includes(extname(fileName).toLowerCase())
+
+    this.outQueue = this.outQueue.then(async () => {
+      try {
+        if (isImage) {
+          const up = await this.client.im.image.create({
+            data: { image_type: 'message', image: createReadStream(filePath) },
+          })
+          const imageKey = up?.data?.image_key ?? up?.image_key
+          if (!imageKey) throw new Error(`图片上传被拒: ${up?.msg ?? 'no image_key'}`)
+          await this.sendMessage(windowKey, 'image', JSON.stringify({ image_key: imageKey }))
+        } else {
+          const up = await this.client.im.file.create({
+            data: { file_type: 'stream', file_name: fileName, file: createReadStream(filePath) },
+          })
+          const fileKey = up?.data?.file_key ?? up?.file_key
+          if (!fileKey) throw new Error(`文件上传被拒: ${up?.msg ?? 'no file_key'}`)
+          await this.sendMessage(windowKey, 'file', JSON.stringify({ file_key: fileKey }))
+        }
+        if (caption) await this.say(windowKey, caption)
+      } catch (error: any) {
+        this.logger.warn(`dsh-chatops: 飞书文件发送失败 ${fileName}: ${error?.message ?? error}`)
+        await this.say(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`)
+      }
+    })
+    return this.outQueue
   }
 
   /** Returns the created message id when available. */
