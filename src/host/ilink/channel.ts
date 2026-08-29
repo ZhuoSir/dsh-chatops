@@ -415,6 +415,9 @@ export class ILinkChannel {
       } catch (error: any) {
         this.logger.warn(`dsh-chatops: 文件发送失败 ${fileName}: ${error?.message ?? error}`)
         await this.say(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`)
+        // Re-throw: callers (bridge → im_send_file tool) must NOT report
+        // success for a failed delivery.
+        throw error
       }
     })
     return this.bulkQueue

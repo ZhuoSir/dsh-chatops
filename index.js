@@ -1129,6 +1129,7 @@ var ILinkChannel = class {
 			} catch (error) {
 				this.logger.warn(`dsh-chatops: 文件发送失败 ${fileName}: ${error?.message ?? error}`);
 				await this.say(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`);
+				throw error;
 			}
 		});
 		return this.bulkQueue;
@@ -2680,11 +2681,39 @@ var SessionBridge = class {
 	*/
 	async sendFileForSession(sessionId, relPath, caption) {
 		const resolved = this.resolveWorkspaceFile(sessionId, relPath);
-		if ("error" in resolved) return `发送失败：${resolved.error}`;
+		if ("error" in resolved) {
+			this.auth.audit("file/send-failed", {
+				sessionId,
+				relPath,
+				reason: resolved.error
+			});
+			return `发送失败：${resolved.error}`;
+		}
 		const windows = this.auth.windowsForSession(sessionId);
-		if (windows.length === 0) return "发送失败：该会话没有绑定任何 IM 窗口（在微信/飞书里 /use 绑定后再试）。";
+		if (windows.length === 0) {
+			this.auth.audit("file/send-failed", {
+				sessionId,
+				relPath,
+				reason: "no-bound-window"
+			});
+			return "发送失败：该会话没有绑定任何 IM 窗口（在微信/飞书里 /use 绑定后再试）。";
+		}
 		let sent = 0;
-		for (const windowKey of windows) if (await this.sendFileToWindow(windowKey, resolved.path, caption ?? `📎 ${basename(resolved.path)}`)) sent++;
+		let lastError = null;
+		for (const windowKey of windows) try {
+			if (await this.sendFileToWindow(windowKey, resolved.path, caption ?? `📎 ${basename(resolved.path)}`)) sent++;
+			else lastError = "通道不支持文件发送";
+		} catch (error) {
+			lastError = error?.message ?? String(error);
+		}
+		if (sent === 0 && lastError) {
+			this.auth.audit("file/send-failed", {
+				sessionId,
+				relPath,
+				reason: lastError
+			});
+			return `发送失败：${lastError}`;
+		}
 		this.auth.audit("file/send", {
 			sessionId,
 			path: resolved.path,
