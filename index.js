@@ -1042,14 +1042,17 @@ var ILinkChannel = class {
 			});
 			return this.interactiveQueue;
 		}
-		this.bulkQueue = this.bulkQueue.then(async () => {
-			for (const chunk of chunks) {
-				while (this.pendingInteractive > 0) await new Promise((r) => setTimeout(r, 300));
-				await this.throttle(this.config.reply?.rateLimitMs ?? 1200, 400);
-				await this.sendChunk(windowKey, chunk);
-			}
-		});
+		this.bulkQueue = this.bulkQueue.then(() => this.sayInline(windowKey, text));
 		return this.bulkQueue;
+	}
+	/** 队列任务内内联发送文本（bulk 语义：让出交互流量）；不重新挂链队列，
+	*  避免 sendFile 在队列任务内 await say() 造成自引用等待或交互队列耦合。 */
+	async sayInline(windowKey, text) {
+		for (const chunk of chunkText(text, this.config.reply?.maxChunkBytes ?? 6e3)) {
+			while (this.pendingInteractive > 0) await new Promise((r) => setTimeout(r, 300));
+			await this.throttle(this.config.reply?.rateLimitMs ?? 1200, 400);
+			await this.sendChunk(windowKey, chunk);
+		}
 	}
 	async sendChunk(windowKey, chunk) {
 		const { baseUrl } = this.store.data;
@@ -1124,11 +1127,11 @@ var ILinkChannel = class {
 					ciphertextSize,
 					contextToken: this.contextTokens.get(windowKey)
 				});
-				if (caption) await this.say(windowKey, caption);
+				if (caption) await this.sayInline(windowKey, caption);
 				this.dbg(`file sent to ${toUserId}: ${fileName} (${bytes.byteLength}B, ${isImage ? "image" : "file"})`);
 			} catch (error) {
 				this.logger.warn(`dsh-chatops: 文件发送失败 ${fileName}: ${error?.message ?? error}`);
-				await this.say(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`);
+				await this.sayInline(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`);
 				throw error;
 			}
 		});
@@ -1529,14 +1532,16 @@ var FeishuChannel = class {
 		}
 	}
 	say(windowKey, text, _opts) {
-		const chunks = chunkText(text, this.config.reply?.maxChunkBytes ?? 6e3);
-		this.outQueue = this.outQueue.then(async () => {
-			for (const chunk of chunks) {
-				await this.throttle();
-				await this.sendMessage(windowKey, "text", JSON.stringify({ text: chunk }));
-			}
-		});
+		this.outQueue = this.outQueue.then(() => this.sayInline(windowKey, text));
 		return this.outQueue;
+	}
+	/** 队列任务内内联发送文本：直接循环发送，不重新挂链 outQueue，
+	*  避免 sendFile 在队列任务内 await say() 造成自引用 Promise 死锁。 */
+	async sayInline(windowKey, text) {
+		for (const chunk of chunkText(text, this.config.reply?.maxChunkBytes ?? 6e3)) {
+			await this.throttle();
+			await this.sendMessage(windowKey, "text", JSON.stringify({ text: chunk }));
+		}
 	}
 	/** Approval card; part of the channel card capability probed by the bridge. */
 	async sendApprovalCard(windowKey, data) {
@@ -1596,10 +1601,10 @@ var FeishuChannel = class {
 					if (!fileKey) throw new Error(`文件上传被拒: ${up?.msg ?? "no file_key"}`);
 					await this.sendMessage(windowKey, "file", JSON.stringify({ file_key: fileKey }));
 				}
-				if (caption) await this.say(windowKey, caption);
+				if (caption) await this.sayInline(windowKey, caption);
 			} catch (error) {
 				this.logger.warn(`dsh-chatops: 飞书文件发送失败 ${fileName}: ${error?.message ?? error}`);
-				await this.say(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`);
+				await this.sayInline(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`);
 			}
 		});
 		return this.outQueue;
@@ -1759,14 +1764,16 @@ var DingTalkChannel = class {
 		});
 	}
 	say(windowKey, text, _opts) {
-		const chunks = chunkText(text, this.config.reply?.maxChunkBytes ?? 6e3);
-		this.outQueue = this.outQueue.then(async () => {
-			for (const chunk of chunks) {
-				await this.throttle();
-				await this.sendRobotMessage(windowKey, "sampleText", { content: chunk });
-			}
-		});
+		this.outQueue = this.outQueue.then(() => this.sayInline(windowKey, text));
 		return this.outQueue;
+	}
+	/** 队列任务内内联发送文本：直接循环发送，不重新挂链 outQueue，
+	*  避免 sendFile 在队列任务内 await say() 造成自引用 Promise 死锁。 */
+	async sayInline(windowKey, text) {
+		for (const chunk of chunkText(text, this.config.reply?.maxChunkBytes ?? 6e3)) {
+			await this.throttle();
+			await this.sendRobotMessage(windowKey, "sampleText", { content: chunk });
+		}
 	}
 	/** Native file/image delivery: oapi media/upload → sampleFile / sampleImageMsg. */
 	async sendFile(windowKey, filePath, caption) {
@@ -1790,10 +1797,10 @@ var DingTalkChannel = class {
 					fileName,
 					fileType: extname(fileName).replace(".", "")
 				});
-				if (caption) await this.say(windowKey, caption);
+				if (caption) await this.sayInline(windowKey, caption);
 			} catch (error) {
 				this.logger.warn(`dsh-chatops: 钉钉文件发送失败 ${fileName}: ${error?.message ?? error}`);
-				await this.say(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`);
+				await this.sayInline(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`);
 			}
 		});
 		return this.outQueue;
@@ -2003,14 +2010,16 @@ var WecomChannel = class {
 		});
 	}
 	say(windowKey, text, _opts) {
-		const chunks = chunkText(text, this.config.reply?.maxChunkBytes ?? 6e3);
-		this.outQueue = this.outQueue.then(async () => {
-			for (const chunk of chunks) {
-				await this.throttle();
-				await this.sendText(windowKey, chunk);
-			}
-		});
+		this.outQueue = this.outQueue.then(() => this.sayInline(windowKey, text));
 		return this.outQueue;
+	}
+	/** 队列任务内内联发送文本：直接循环发送，不重新挂链 outQueue，
+	*  避免 sendFile 在队列任务内 await say() 造成自引用 Promise 死锁。 */
+	async sayInline(windowKey, text) {
+		for (const chunk of chunkText(text, this.config.reply?.maxChunkBytes ?? 6e3)) {
+			await this.throttle();
+			await this.sendText(windowKey, chunk);
+		}
 	}
 	/** Native file/image delivery: uploadMedia → sendMediaMessage. */
 	async sendFile(windowKey, filePath, caption) {
@@ -2034,10 +2043,10 @@ var WecomChannel = class {
 					filename: fileName
 				});
 				await this.client.sendMediaMessage(this.chatIdOf(windowKey), isImage ? "image" : "file", mediaId);
-				if (caption) await this.say(windowKey, caption);
+				if (caption) await this.sayInline(windowKey, caption);
 			} catch (error) {
 				this.logger.warn(`dsh-chatops: 企微文件发送失败 ${fileName}: ${error?.message ?? error}`);
-				await this.say(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`);
+				await this.sayInline(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`);
 			}
 		});
 		return this.outQueue;

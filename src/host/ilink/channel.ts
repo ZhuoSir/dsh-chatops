@@ -345,16 +345,20 @@ export class ILinkChannel {
       })
       return this.interactiveQueue
     }
-    this.bulkQueue = this.bulkQueue.then(async () => {
-      for (const chunk of chunks) {
-        // Interactive traffic always wins: pause the bulk drain while any
-        // interactive message is waiting or in flight.
-        while (this.pendingInteractive > 0) await new Promise((r) => setTimeout(r, 300))
-        await this.throttle(this.config.reply?.rateLimitMs ?? 1_200, 400)
-        await this.sendChunk(windowKey, chunk)
-      }
-    })
+    this.bulkQueue = this.bulkQueue.then(() => this.sayInline(windowKey, text))
     return this.bulkQueue
+  }
+
+  /** 队列任务内内联发送文本（bulk 语义：让出交互流量）；不重新挂链队列，
+   *  避免 sendFile 在队列任务内 await say() 造成自引用等待或交互队列耦合。 */
+  private async sayInline(windowKey: string, text: string): Promise<void> {
+    for (const chunk of chunkText(text, this.config.reply?.maxChunkBytes ?? 6000)) {
+      // Interactive traffic always wins: pause the bulk drain while any
+      // interactive message is waiting or in flight.
+      while (this.pendingInteractive > 0) await new Promise((r) => setTimeout(r, 300))
+      await this.throttle(this.config.reply?.rateLimitMs ?? 1_200, 400)
+      await this.sendChunk(windowKey, chunk)
+    }
   }
 
   private async sendChunk(windowKey: string, chunk: string): Promise<void> {
@@ -410,11 +414,11 @@ export class ILinkChannel {
           downloadParam, aesKey, ciphertextSize,
           contextToken: this.contextTokens.get(windowKey),
         })
-        if (caption) await this.say(windowKey, caption)
+        if (caption) await this.sayInline(windowKey, caption)
         this.dbg(`file sent to ${toUserId}: ${fileName} (${bytes.byteLength}B, ${isImage ? 'image' : 'file'})`)
       } catch (error: any) {
         this.logger.warn(`dsh-chatops: 文件发送失败 ${fileName}: ${error?.message ?? error}`)
-        await this.say(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`)
+        await this.sayInline(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`)
         // Re-throw: callers (bridge → im_send_file tool) must NOT report
         // success for a failed delivery.
         throw error

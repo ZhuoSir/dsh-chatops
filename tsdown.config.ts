@@ -1,12 +1,13 @@
-import { defineConfig } from 'tsdown'
-
 // Two build halves:
 //  - host:   ESM bundle at package root (main: index.js); @deepseek-ai/* and
 //            channel SDKs stay external (profile provides / lazy-loaded).
 //  - client: ONE CJS browser bundle at lib/client.js, wrapped by
 //            scripts/wrap-client.mjs into the window.__ModuleLoader__ format
 //            the web shell serves at /plugins/dsh-chatops/client.js.
-export default defineConfig([
+// Note: keep this file import-free — unrun transpiles it to a temp cache and
+// cannot resolve bare imports like 'tsdown' from there (build would fail with
+// "Cannot find package 'tsdown'"). tsdown accepts a plain config array.
+export default [
   {
     entry: { index: 'src/host/index.ts' },
     format: ['esm'],
@@ -31,4 +32,4 @@ export default defineConfig([
     sourcemap: false,
     external: ['react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', /^@deepseek-ai\//],
   },
-])
+]

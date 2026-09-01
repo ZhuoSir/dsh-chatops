@@ -162,14 +162,17 @@ export class DingTalkChannel {
   // ------------------------------------------------------------- outbound --
 
   say(windowKey: string, text: string, _opts?: { bulk?: boolean }): Promise<void> {
-    const chunks = chunkText(text, this.config.reply?.maxChunkBytes ?? 6000)
-    this.outQueue = this.outQueue.then(async () => {
-      for (const chunk of chunks) {
-        await this.throttle()
-        await this.sendRobotMessage(windowKey, 'sampleText', { content: chunk })
-      }
-    })
+    this.outQueue = this.outQueue.then(() => this.sayInline(windowKey, text))
     return this.outQueue
+  }
+
+  /** 队列任务内内联发送文本：直接循环发送，不重新挂链 outQueue，
+   *  避免 sendFile 在队列任务内 await say() 造成自引用 Promise 死锁。 */
+  private async sayInline(windowKey: string, text: string): Promise<void> {
+    for (const chunk of chunkText(text, this.config.reply?.maxChunkBytes ?? 6000)) {
+      await this.throttle()
+      await this.sendRobotMessage(windowKey, 'sampleText', { content: chunk })
+    }
   }
 
   /** Native file/image delivery: oapi media/upload → sampleFile / sampleImageMsg. */
@@ -195,10 +198,10 @@ export class DingTalkChannel {
             fileType: extname(fileName).replace('.', ''),
           })
         }
-        if (caption) await this.say(windowKey, caption)
+        if (caption) await this.sayInline(windowKey, caption)
       } catch (error: any) {
         this.logger.warn(`dsh-chatops: 钉钉文件发送失败 ${fileName}: ${error?.message ?? error}`)
-        await this.say(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`)
+        await this.sayInline(windowKey, `❌ 文件「${fileName}」发送失败：${error?.message ?? error}`)
       }
     })
     return this.outQueue
