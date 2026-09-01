@@ -2261,6 +2261,8 @@ var SessionBridge = class {
 	pendingApprovals = /* @__PURE__ */ new Map();
 	/** The same approvals keyed by approval id (card-button callbacks carry ids). */
 	pendingById = /* @__PURE__ */ new Map();
+	/** windowKey → pending danger-full-access confirmation (60s TTL). */
+	pendingPolicy = /* @__PURE__ */ new Map();
 	/** sessionId|windowKey → streaming progress card (feishu). */
 	progressCards = /* @__PURE__ */ new Map();
 	/** Last active root agent, mirrors dsh-cron's delivery heuristic. */
@@ -2581,8 +2583,9 @@ var SessionBridge = class {
 			case "/send": return await this.sendFileCommand(msg.windowKey, arg);
 			case "/approve": return this.decideApproval(msg.windowKey, "allowed-once");
 			case "/reject": return this.decideApproval(msg.windowKey, "rejected");
-			case "/stop": return "⏳ /stop 尚未接入：中断 API 待确认（GUI 侧 interrupt 路径）。";
-			case "/new": return "⏳ /new 尚未接入：会话创建 API 待确认。请先在 GUI 新建会话后用 /use 绑定。";
+			case "/stop": return await this.stopSession(msg.windowKey);
+			case "/new": return await this.newSession(msg.windowKey, arg);
+			case "/policy": return this.policyCommand(msg.windowKey, arg);
 			default: return `未知指令 ${cmd}，回复 /help 查看可用指令。`;
 		}
 	}
@@ -2647,7 +2650,30 @@ var SessionBridge = class {
 	showStatus(windowKey) {
 		const sessionId = this.auth.getBinding(windowKey)?.sessionId;
 		if (!sessionId) return "未绑定会话。回复 /sessions + /use <编号> 先绑定。";
-		return (this.turnStatus.get(sessionId) ?? "idle") === "running" ? "🔄 当前会话正在执行中…" : "💤 当前会话空闲，可以直接发消息。";
+		const agent = this.liveAgentOf(sessionId);
+		const running = this.turnStatus.get(sessionId) === "running";
+		const lines = [];
+		lines.push(`📊 会话：${agent ? this.titleOf(agent.session) : sessionId}`);
+		lines.push(`状态：${running ? "🔄 运行中" : "💤 空闲"}`);
+		if (agent?.options?.model) lines.push(`模型：${agent.options.provider ? agent.options.provider + " / " : ""}${agent.options.model}`);
+		if (agent?.session) {
+			try {
+				const mode = this.ctx.sandboxPolicy?.resolve?.({ session: agent.session })?.mode;
+				const labels = {
+					"read-only": "只读",
+					"workspace-write": "工作区写",
+					"danger-full-access": "完全开放"
+				};
+				if (mode) lines.push(`写入安全线：${labels[mode] ?? mode}（/policy 切换）`);
+			} catch {}
+			try {
+				const approval = this.ctx.approval?.effectivePolicy?.(agent.session);
+				if (approval) lines.push(`审批策略：${approval}`);
+			} catch {}
+			const cwd = agent.session.header?.cwd;
+			if (cwd) lines.push(`工作区：${cwd}`);
+		} else lines.push("（会话未加载，发消息会自动唤醒）");
+		return lines.join("\n");
 	}
 	showLog(windowKey, count) {
 		const sessionId = this.auth.getBinding(windowKey)?.sessionId;
@@ -2674,6 +2700,150 @@ var SessionBridge = class {
 		});
 		pending.resolve(outcome);
 		return outcome === "allowed-once" ? "✅ 已批准，继续执行。" : "❌ 已拒绝。";
+	}
+	/** apiProxy domains (sessions.cancel/create). Absent in headless profiles. */
+	apiProxy() {
+		try {
+			return this.ctx.apiProxy ?? this.ctx.get?.("apiProxy") ?? null;
+		} catch {
+			return null;
+		}
+	}
+	/** /stop: cancel the bound session's running turn (same path as the GUI stop button). */
+	async stopSession(windowKey) {
+		const sessionId = this.auth.getBinding(windowKey)?.sessionId;
+		if (!sessionId) return "未绑定会话。回复 /sessions + /use <编号> 先绑定。";
+		if (this.turnStatus.get(sessionId) !== "running") return "💤 当前会话没有在执行的任务。";
+		const api = this.apiProxy();
+		if (!api?.sessions?.cancel) return "⏳ 当前环境不支持终止（apiProxy 不可用）。";
+		try {
+			await api.sessions.cancel({ sessionId });
+			this.turnStatus.set(sessionId, "idle");
+			this.auth.audit("session/cancel", {
+				sessionId,
+				windowKey
+			});
+			return "🛑 已终止当前任务。";
+		} catch (error) {
+			return `终止失败：${error?.message ?? error}`;
+		}
+	}
+	/**
+	* /policy [0|1|2]: read/switch the session's write-safety line.
+	* 0=read-only 1=workspace-write 2=danger-full-access (needs YES confirm).
+	* Writes the `sandbox/mode` session event — the same fold the GUI uses.
+	*/
+	policyCommand(windowKey, arg) {
+		const sessionId = this.auth.getBinding(windowKey)?.sessionId;
+		if (!sessionId) return "未绑定会话。回复 /sessions + /use <编号> 先绑定。";
+		const agent = this.liveAgentOf(sessionId);
+		if (!agent?.session) return "会话未加载，无法读写安全线。请 /use 重新绑定（📦会话会自动唤醒）。";
+		const MODE_LABELS = {
+			"read-only": "只读",
+			"workspace-write": "工作区写",
+			"danger-full-access": "完全开放"
+		};
+		const MODES = [
+			"read-only",
+			"workspace-write",
+			"danger-full-access"
+		];
+		let current = "read-only";
+		try {
+			current = this.ctx.sandboxPolicy?.resolve?.({ session: agent.session })?.mode ?? current;
+		} catch {}
+		const pending = this.pendingPolicy.get(windowKey);
+		if (pending && Date.now() - pending.at < 6e4) {
+			if (arg === "YES") {
+				this.pendingPolicy.delete(windowKey);
+				return this.applyPolicy(agent.session, pending.mode, windowKey);
+			}
+			this.pendingPolicy.delete(windowKey);
+		}
+		if (!arg) {
+			const idx = MODES.indexOf(current);
+			return `🔒 当前安全线：${MODE_LABELS[current] ?? current}（${idx}）\n回复 /policy 0|1|2 切换：\n0=只读  1=工作区写  2=完全开放（危险）`;
+		}
+		const mode = MODES[Number(arg)];
+		if (!mode) return "用法：/policy 0|1|2（0=只读 1=工作区写 2=完全开放）";
+		if (mode === current) return `已是${MODE_LABELS[mode]}模式，无需切换。`;
+		if (mode === "danger-full-access") {
+			this.pendingPolicy.set(windowKey, {
+				mode,
+				at: Date.now()
+			});
+			return "⚠️ 完全开放将允许任意文件读写，回复 YES 确认（60 秒内有效）。";
+		}
+		return this.applyPolicy(agent.session, mode, windowKey);
+	}
+	applyPolicy(session, mode, windowKey) {
+		const labels = {
+			"read-only": "只读",
+			"workspace-write": "工作区写",
+			"danger-full-access": "完全开放"
+		};
+		try {
+			session.append("sandbox/mode", { mode });
+			this.auth.audit("policy/set", {
+				sessionId: session.id,
+				mode,
+				windowKey
+			});
+			return `✅ 已切换：${labels[mode] ?? mode}`;
+		} catch (error) {
+			return `切换失败：${error?.message ?? error}`;
+		}
+	}
+	/**
+	* /new [prompt]: create a session in the current workspace (bound session's
+	* cwd, else the most recently active root's), bind this window to it, and
+	* optionally deliver the prompt immediately.
+	*/
+	async newSession(windowKey, prompt) {
+		const api = this.apiProxy();
+		if (!api?.sessions?.create) return "⏳ 当前环境不支持创建会话（apiProxy 不可用）。";
+		const boundId = this.auth.getBinding(windowKey)?.sessionId;
+		const cwd = (boundId ? this.liveAgentOf(boundId)?.session?.header?.cwd : null) ?? this.lastActiveRoot?.session?.header?.cwd ?? this.roots()[this.roots().length - 1]?.session?.header?.cwd;
+		if (!cwd) return "无法确定工作区（先 /use 绑定一个会话，或在 GUI 打开一个会话）。";
+		let created;
+		try {
+			created = await api.sessions.create({ cwd });
+		} catch (error) {
+			return `创建失败：${error?.message ?? error}`;
+		}
+		const newId = created?.sessionId;
+		if (!newId) return "创建失败：未返回会话 id。";
+		this.auth.setBinding(windowKey, newId);
+		this.auth.audit("session/create", {
+			windowKey,
+			sessionId: newId,
+			cwd,
+			hadPrompt: Boolean(prompt)
+		});
+		if (!prompt) return `✅ 已在当前工作区创建并绑定新会话（${shortId(newId)}）。直接发消息即开始。`;
+		let agent = null;
+		for (let i = 0; i < 6 && !agent; i++) {
+			agent = this.liveAgentOf(newId);
+			if (!agent) await new Promise((r) => setTimeout(r, 400));
+		}
+		if (!agent) return `✅ 新会话已创建并绑定（${shortId(newId)}），但 prompt 投递失败：agent 尚未就绪，请直接再发一遍内容。`;
+		try {
+			const message = createUserMessage({
+				content: [{
+					type: "text",
+					text: prompt
+				}],
+				source: {
+					kind: "plugin",
+					plugin: "dsh-chatops"
+				}
+			});
+			agent.followup(message);
+			this.turnStatus.set(newId, "running");
+			return `✅ 新会话已创建并绑定（${shortId(newId)}），prompt 已投递，完成后通知你。`;
+		} catch (error) {
+			return `✅ 新会话已创建并绑定（${shortId(newId)}），但 prompt 投递失败：${error?.message ?? error}`;
+		}
 	}
 	/** /send <path>: push a workspace file to the bound IM window. */
 	async sendFileCommand(windowKey, arg) {
@@ -2815,6 +2985,9 @@ const HELP_TEXT = `🤖 dsh-chatops 指令：
 /status — 会话运行状态
 /log [n] — 最近 n 条完整输出
 /approve /reject — 审批
+/stop — 终止当前任务
+/policy — 查看/切换写入安全线
+/new [提示词] — 当前工作区建新会话
 /send <路径> — 回传工作区文件
 直接发送其他文字 = 作为 prompt 发给绑定会话`;
 function shortId(id) {
