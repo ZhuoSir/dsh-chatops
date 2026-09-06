@@ -2349,7 +2349,9 @@ var SessionBridge = class {
 				id: s.id,
 				title: this.titleOf(s),
 				live: true,
-				agent
+				agent,
+				cwdName: cwdBasename(s.header?.cwd),
+				code: shortCode(s.id)
 			});
 		}
 		const q = this.query();
@@ -2383,9 +2385,11 @@ var SessionBridge = class {
 				const liveAgent = this.liveAgentOf(h.id);
 				out.push({
 					id: h.id,
-					title: title ?? (liveAgent ? this.titleOf(liveAgent.session) : null) ?? (cwdName ? `[${cwdName}] ` : "") + `${String(h.id).slice(8, 14)}…`,
+					title: title ?? (liveAgent ? this.titleOf(liveAgent.session) : null) ?? "未命名会话",
 					live: Boolean(liveAgent),
-					agent: liveAgent ?? void 0
+					agent: liveAgent ?? void 0,
+					cwdName: cwdName || cwdBasename(liveAgent?.session?.header?.cwd),
+					code: shortCode(h.id)
 				});
 			}));
 			this.coldDiag += `；进入列表 ${cold.length} 条`;
@@ -2575,7 +2579,7 @@ var SessionBridge = class {
 		const arg = rest.join(" ").trim();
 		switch (cmd) {
 			case "/help": return HELP_TEXT;
-			case "/sessions": return await this.listSessions();
+			case "/sessions": return await this.listSessions(arg === "debug");
 			case "/use": return await this.useSession(msg.windowKey, arg);
 			case "/bind": return this.showBinding(msg.windowKey);
 			case "/status": return this.showStatus(msg.windowKey);
@@ -2604,22 +2608,34 @@ var SessionBridge = class {
 			return null;
 		}
 	}
-	async listSessions() {
+	async listSessions(debug = false) {
 		const all = await this.allSessions();
 		if (all.length === 0) return "当前没有任何会话。请先在 DSH GUI 中创建一个会话。";
+		const groups = /* @__PURE__ */ new Map();
+		for (const s of all) {
+			const key = `${s.title}|${s.cwdName ?? ""}`;
+			groups.set(key, (groups.get(key) ?? 0) + 1);
+		}
 		const lines = all.map((s, i) => {
-			const status = s.live ? this.turnStatus.get(s.id) === "running" ? "🔄运行中" : "💤空闲" : "📦未加载";
-			return `${i + 1}. ${s.title} ${status}\n   id: ${shortId(s.id)}`;
+			const status = s.live ? this.turnStatus.get(s.id) === "running" ? "🔄" : "💤" : "📦";
+			const title = s.title.length > 20 ? s.title.slice(0, 20) + "…" : s.title;
+			const collides = (groups.get(`${s.title}|${s.cwdName ?? ""}`) ?? 0) > 1;
+			const tag = [s.cwdName ? `（${s.cwdName}）` : "", collides ? ` #${s.code}` : ""].join("");
+			return `${i + 1}. ${title} ${status}${tag}`;
 		});
-		return `📋 会话列表（${all.length} 个）：\n${lines.join("\n")}\n\n[诊断] ${this.coldDiag}\n回复 /use <编号> 切换（📦会话会自动唤醒）`;
+		const tail = debug ? `\n\n[诊断] ${this.coldDiag}` : "";
+		return `📋 会话列表（${all.length} 个）：\n${lines.join("\n")}${tail}\n\n回复 /use <序号> 切换（📦会自动唤醒）`;
 	}
 	async useSession(windowKey, arg) {
-		if (!arg) return "用法：/use <编号或会话id>";
+		if (!arg) return await this.listSessions();
 		const list = this.lastList.length > 0 ? this.lastList : await this.allSessions();
 		let entry = null;
 		const index = Number.parseInt(arg, 10);
 		if (Number.isFinite(index) && index >= 1 && index <= list.length) entry = list[index - 1];
-		else entry = list.find((s) => s.id === arg || s.id.startsWith(arg)) ?? null;
+		else {
+			const code = arg.replace(/^#/, "");
+			entry = list.find((s) => s.id === arg || s.id.startsWith(arg) || s.code === code.toLowerCase()) ?? null;
+		}
 		if (!entry) return `找不到会话 "${arg}"。回复 /sessions 查看列表。`;
 		if (!(entry.agent ?? this.liveAgentOf(entry.id))) try {
 			const handle = await this.ctx.agents.resume({
@@ -2990,6 +3006,15 @@ const HELP_TEXT = `🤖 dsh-chatops 指令：
 /new [提示词] — 当前工作区建新会话
 /send <路径> — 回传工作区文件
 直接发送其他文字 = 作为 prompt 发给绑定会话`;
+/** 4-char disambiguation code from a session id (strips the "session-" prefix). */
+function shortCode(id) {
+	return (typeof id === "string" ? id.replace(/^session-/, "") : "").slice(0, 4).toLowerCase();
+}
+/** Last path segment of a cwd, for disambiguating duplicate titles. */
+function cwdBasename(cwd) {
+	if (typeof cwd !== "string" || !cwd) return void 0;
+	return cwd.split("/").filter(Boolean).pop() ?? void 0;
+}
 function shortId(id) {
 	const text = typeof id === "string" ? id : "?";
 	return text.length > 24 ? text.slice(0, 24) + "…" : text;

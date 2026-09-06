@@ -37,6 +37,17 @@ const LOG_TOTAL_CAP = 12_000
 /** /log output longer than this is sent as a .txt file (file-capable channels). */
 const LONG_OUTPUT_FILE_THRESHOLD = 4_000
 
+interface SessionEntry {
+  id: string
+  title: string
+  live: boolean
+  agent?: any
+  /** Workspace folder name, for disambiguating duplicate titles. */
+  cwdName?: string
+  /** 4-char collision code (only displayed when title+workspace collide). */
+  code?: string
+}
+
 interface PendingApproval {
   id: string
   req: any
@@ -63,7 +74,7 @@ export class SessionBridge {
   /** Last active root agent, mirrors dsh-cron's delivery heuristic. */
   private lastActiveRoot: any = null
   /** Last listing shown by /sessions, so /use <编号> maps to the same order. */
-  private lastList: Array<{ id: string; title: string; live: boolean; agent?: any }> = []
+  private lastList: Array<SessionEntry> = []
 
   constructor(
     private ctx: any,
@@ -149,14 +160,21 @@ export class SessionBridge {
    * 全量顶层会话：live roots 在前（可交互），其后是持久化里的冷会话。
    * 结果缓存到 lastList，供 /use <编号> 按同一顺序取。
    */
-  private async allSessions(): Promise<Array<{ id: string; title: string; live: boolean; agent?: any }>> {
-    const out: Array<{ id: string; title: string; live: boolean; agent?: any }> = []
+  private async allSessions(): Promise<Array<SessionEntry>> {
+    const out: Array<SessionEntry> = []
     const seen = new Set<string>()
     for (const agent of this.roots()) {
       const s = agent?.session
       if (!s?.id || seen.has(s.id)) continue
       seen.add(s.id)
-      out.push({ id: s.id, title: this.titleOf(s), live: true, agent })
+      out.push({
+        id: s.id,
+        title: this.titleOf(s),
+        live: true,
+        agent,
+        cwdName: cwdBasename(s.header?.cwd),
+        code: shortCode(s.id),
+      })
     }
     const q = this.query()
     if (!q?.listSessions) {
@@ -193,9 +211,11 @@ export class SessionBridge {
         const liveAgent = this.liveAgentOf(h.id)
         out.push({
           id: h.id,
-          title: title ?? (liveAgent ? this.titleOf(liveAgent.session) : null) ?? (cwdName ? `[${cwdName}] ` : '') + `${String(h.id).slice(8, 14)}…`,
+          title: title ?? (liveAgent ? this.titleOf(liveAgent.session) : null) ?? '未命名会话',
           live: Boolean(liveAgent),
           agent: liveAgent ?? undefined,
+          cwdName: cwdName || cwdBasename(liveAgent?.session?.header?.cwd),
+          code: shortCode(h.id),
         })
       }))
       this.coldDiag += `；进入列表 ${cold.length} 条`
@@ -420,7 +440,7 @@ export class SessionBridge {
       case '/help':
         return HELP_TEXT
       case '/sessions':
-        return await this.listSessions()
+        return await this.listSessions(arg === 'debug')
       case '/use':
         return await this.useSession(msg.windowKey, arg)
       case '/bind':
@@ -465,27 +485,38 @@ export class SessionBridge {
     }
   }
 
-  private async listSessions(): Promise<string> {
+  private async listSessions(debug = false): Promise<string> {
     const all = await this.allSessions()
     if (all.length === 0) return '当前没有任何会话。请先在 DSH GUI 中创建一个会话。'
+    // Ambiguity pass: same title + same workspace still colliding gets a #code suffix.
+    const groups = new Map<string, number>()
+    for (const s of all) {
+      const key = `${s.title}|${s.cwdName ?? ''}`
+      groups.set(key, (groups.get(key) ?? 0) + 1)
+    }
     const lines = all.map((s, i) => {
       const status = s.live
-        ? this.turnStatus.get(s.id) === 'running' ? '🔄运行中' : '💤空闲'
-        : '📦未加载'
-      return `${i + 1}. ${s.title} ${status}\n   id: ${shortId(s.id)}`
+        ? this.turnStatus.get(s.id) === 'running' ? '🔄' : '💤'
+        : '📦'
+      const title = s.title.length > 20 ? s.title.slice(0, 20) + '…' : s.title
+      const collides = (groups.get(`${s.title}|${s.cwdName ?? ''}`) ?? 0) > 1
+      const tag = [s.cwdName ? `（${s.cwdName}）` : '', collides ? ` #${s.code}` : ''].join('')
+      return `${i + 1}. ${title} ${status}${tag}`
     })
-    return `📋 会话列表（${all.length} 个）：\n${lines.join('\n')}\n\n[诊断] ${this.coldDiag}\n回复 /use <编号> 切换（📦会话会自动唤醒）`
+    const tail = debug ? `\n\n[诊断] ${this.coldDiag}` : ''
+    return `📋 会话列表（${all.length} 个）：\n${lines.join('\n')}${tail}\n\n回复 /use <序号> 切换（📦会自动唤醒）`
   }
 
   private async useSession(windowKey: string, arg: string): Promise<string> {
-    if (!arg) return '用法：/use <编号或会话id>'
+    if (!arg) return await this.listSessions()
     const list = this.lastList.length > 0 ? this.lastList : await this.allSessions()
-    let entry: { id: string; title: string; live: boolean; agent?: any } | null = null
+    let entry: SessionEntry | null = null
     const index = Number.parseInt(arg, 10)
     if (Number.isFinite(index) && index >= 1 && index <= list.length) {
       entry = list[index - 1]
     } else {
-      entry = list.find((s) => s.id === arg || s.id.startsWith(arg)) ?? null
+      const code = arg.replace(/^#/, '')
+      entry = list.find((s) => s.id === arg || s.id.startsWith(arg) || s.code === code.toLowerCase()) ?? null
     }
     if (!entry) return `找不到会话 "${arg}"。回复 /sessions 查看列表。`
     // 活会话（含非 root 的 continuable 子会话）直接绑定；真冷会话才 resume
@@ -865,6 +896,18 @@ export const HELP_TEXT = `🤖 dsh-chatops 指令：
 直接发送其他文字 = 作为 prompt 发给绑定会话`
 
 // ------------------------------------------------------------------ helpers --
+
+/** 4-char disambiguation code from a session id (strips the "session-" prefix). */
+function shortCode(id: unknown): string {
+  const text = typeof id === 'string' ? id.replace(/^session-/, '') : ''
+  return text.slice(0, 4).toLowerCase()
+}
+
+/** Last path segment of a cwd, for disambiguating duplicate titles. */
+function cwdBasename(cwd: unknown): string | undefined {
+  if (typeof cwd !== 'string' || !cwd) return undefined
+  return cwd.split('/').filter(Boolean).pop() ?? undefined
+}
 
 function shortId(id: unknown): string {
   const text = typeof id === 'string' ? id : '?'
