@@ -160,7 +160,7 @@ export class SessionBridge {
    * 全量顶层会话：live roots 在前（可交互），其后是持久化里的冷会话。
    * 结果缓存到 lastList，供 /use <编号> 按同一顺序取。
    */
-  private async allSessions(): Promise<Array<SessionEntry>> {
+  private async allSessions(includeChildren = false): Promise<Array<SessionEntry>> {
     const out: Array<SessionEntry> = []
     const seen = new Set<string>()
     for (const agent of this.roots()) {
@@ -190,10 +190,14 @@ export class SessionBridge {
       }
       // 与 GUI 口径一致：唯一过滤条件是"未归档"（continuable 子会话 GUI 也显示，不排除）
       // SessionRecord 结构: { header: { id, cwd, parentSession? }, live, persisted }
+      // 子会话（subagent/workflow/goal 续跑产生的 parentSession 非空记录）
+      // 默认隐藏——它们不是用户创建的"会话"，全列出会淹没列表。
       const archived = this.archivedIds()
       const cold = records.filter((r) => {
         const h = r?.header ?? r
-        return h?.id && !seen.has(h.id) && !archived.has(h.id)
+        if (!h?.id || seen.has(h.id) || archived.has(h.id)) return false
+        if (!includeChildren && h.parentSession) return false
+        return true
       })
       let titleFails = 0
       await Promise.all(cold.map(async (r) => {
@@ -440,7 +444,7 @@ export class SessionBridge {
       case '/help':
         return HELP_TEXT
       case '/sessions':
-        return await this.listSessions(arg === 'debug')
+        return await this.listSessions(arg === 'debug', arg === 'all' || arg === 'debug')
       case '/use':
         return await this.useSession(msg.windowKey, arg)
       case '/bind':
@@ -485,8 +489,8 @@ export class SessionBridge {
     }
   }
 
-  private async listSessions(debug = false): Promise<string> {
-    const all = await this.allSessions()
+  private async listSessions(debug = false, includeChildren = false): Promise<string> {
+    const all = await this.allSessions(includeChildren)
     if (all.length === 0) return '当前没有任何会话。请先在 DSH GUI 中创建一个会话。'
     // Ambiguity pass: same title + same workspace still colliding gets a #code suffix.
     const groups = new Map<string, number>()
@@ -517,6 +521,10 @@ export class SessionBridge {
     } else {
       const code = arg.replace(/^#/, '')
       entry = list.find((s) => s.id === arg || s.id.startsWith(arg) || s.code === code.toLowerCase()) ?? null
+      if (!entry) {
+        // 兜底：直接 id 绑定时也允许子会话（默认列表过滤了它们，但显式给 id 说明是刻意的）
+        entry = (await this.allSessions(true)).find((s) => s.id === arg || s.id.startsWith(arg)) ?? null
+      }
     }
     if (!entry) return `找不到会话 "${arg}"。回复 /sessions 查看列表。`
     // 活会话（含非 root 的 continuable 子会话）直接绑定；真冷会话才 resume
@@ -883,7 +891,7 @@ export class SessionBridge {
 }
 
 export const HELP_TEXT = `🤖 dsh-chatops 指令：
-/sessions — 会话列表
+/sessions — 会话列表（/sessions all 含子会话）
 /use <编号> — 绑定会话
 /bind — 查看当前绑定
 /status — 会话运行状态

@@ -2338,7 +2338,7 @@ var SessionBridge = class {
 	* 全量顶层会话：live roots 在前（可交互），其后是持久化里的冷会话。
 	* 结果缓存到 lastList，供 /use <编号> 按同一顺序取。
 	*/
-	async allSessions() {
+	async allSessions(includeChildren = false) {
 		const out = [];
 		const seen = /* @__PURE__ */ new Set();
 		for (const agent of this.roots()) {
@@ -2368,7 +2368,9 @@ var SessionBridge = class {
 			const archived = this.archivedIds();
 			const cold = records.filter((r) => {
 				const h = r?.header ?? r;
-				return h?.id && !seen.has(h.id) && !archived.has(h.id);
+				if (!h?.id || seen.has(h.id) || archived.has(h.id)) return false;
+				if (!includeChildren && h.parentSession) return false;
+				return true;
 			});
 			let titleFails = 0;
 			await Promise.all(cold.map(async (r) => {
@@ -2579,7 +2581,7 @@ var SessionBridge = class {
 		const arg = rest.join(" ").trim();
 		switch (cmd) {
 			case "/help": return HELP_TEXT;
-			case "/sessions": return await this.listSessions(arg === "debug");
+			case "/sessions": return await this.listSessions(arg === "debug", arg === "all" || arg === "debug");
 			case "/use": return await this.useSession(msg.windowKey, arg);
 			case "/bind": return this.showBinding(msg.windowKey);
 			case "/status": return this.showStatus(msg.windowKey);
@@ -2608,8 +2610,8 @@ var SessionBridge = class {
 			return null;
 		}
 	}
-	async listSessions(debug = false) {
-		const all = await this.allSessions();
+	async listSessions(debug = false, includeChildren = false) {
+		const all = await this.allSessions(includeChildren);
 		if (all.length === 0) return "当前没有任何会话。请先在 DSH GUI 中创建一个会话。";
 		const groups = /* @__PURE__ */ new Map();
 		for (const s of all) {
@@ -2635,6 +2637,7 @@ var SessionBridge = class {
 		else {
 			const code = arg.replace(/^#/, "");
 			entry = list.find((s) => s.id === arg || s.id.startsWith(arg) || s.code === code.toLowerCase()) ?? null;
+			if (!entry) entry = (await this.allSessions(true)).find((s) => s.id === arg || s.id.startsWith(arg)) ?? null;
 		}
 		if (!entry) return `找不到会话 "${arg}"。回复 /sessions 查看列表。`;
 		if (!(entry.agent ?? this.liveAgentOf(entry.id))) try {
@@ -2995,7 +2998,7 @@ var SessionBridge = class {
 	}
 };
 const HELP_TEXT = `🤖 dsh-chatops 指令：
-/sessions — 会话列表
+/sessions — 会话列表（/sessions all 含子会话）
 /use <编号> — 绑定会话
 /bind — 查看当前绑定
 /status — 会话运行状态
