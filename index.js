@@ -2351,7 +2351,6 @@ var SessionBridge = class {
 				live: true,
 				agent,
 				cwdName: cwdBasename(s.header?.cwd),
-				cwd: typeof s.header?.cwd === "string" ? s.header.cwd : void 0,
 				code: shortCode(s.id)
 			});
 		}
@@ -2392,7 +2391,6 @@ var SessionBridge = class {
 					live: Boolean(liveAgent),
 					agent: liveAgent ?? void 0,
 					cwdName: cwdName || cwdBasename(liveAgent?.session?.header?.cwd),
-					cwd: typeof h.cwd === "string" ? h.cwd : liveAgent?.session?.header?.cwd,
 					code: shortCode(h.id)
 				});
 			}));
@@ -2583,7 +2581,7 @@ var SessionBridge = class {
 		const arg = rest.join(" ").trim();
 		switch (cmd) {
 			case "/help": return HELP_TEXT;
-			case "/sessions": return await this.listSessions(msg.windowKey, arg);
+			case "/sessions": return await this.listSessions(arg === "debug", arg === "all" || arg === "debug");
 			case "/use": return await this.useSession(msg.windowKey, arg);
 			case "/bind": return this.showBinding(msg.windowKey);
 			case "/status": return this.showStatus(msg.windowKey);
@@ -2612,35 +2610,9 @@ var SessionBridge = class {
 			return null;
 		}
 	}
-	/**
-	* 列出会话。默认只显示**当前绑定会话所在工作区**的会话（与 GUI 左侧选中
-	* 工作区一致，避免几十个无关会话刷屏）；`/sessions all` 显示全部，
-	* `/sessions debug` 附诊断。未绑定会话时回退为全部并提示。
-	*/
-	async listSessions(windowKey, arg) {
-		const debug = arg === "debug";
-		const includeChildren = arg === "all" || arg === "debug";
-		const showAll = arg === "all";
-		let all = await this.allSessions(includeChildren);
+	async listSessions(debug = false, includeChildren = false) {
+		const all = await this.allSessions(includeChildren);
 		if (all.length === 0) return "当前没有任何会话。请先在 DSH GUI 中创建一个会话。";
-		let scopeName = null;
-		if (!showAll) {
-			const binding = this.auth.getBinding(windowKey);
-			const boundCwd = binding?.sessionId ? all.find((s) => s.id === binding.sessionId)?.cwd ?? (() => {
-				try {
-					return this.liveAgentOf(binding.sessionId)?.session?.header?.cwd;
-				} catch {
-					return;
-				}
-			})() : void 0;
-			if (boundCwd) {
-				const scoped = all.filter((s) => s.cwd === boundCwd);
-				if (scoped.length > 0) {
-					scopeName = cwdBasename(boundCwd) ?? boundCwd;
-					all = scoped;
-				}
-			}
-		}
 		const groups = /* @__PURE__ */ new Map();
 		for (const s of all) {
 			const key = `${s.title}|${s.cwdName ?? ""}`;
@@ -2653,12 +2625,11 @@ var SessionBridge = class {
 			const head = s.cwdName ? `${s.cwdName} - ` : "";
 			return `${i + 1}. ${head}${title} ${status}${tag}`;
 		});
-		const scope = scopeName ? `，工作区 ${scopeName}` : showAll ? "，全部" : "，全部（绑定会话后按工作区过滤）";
 		const tail = debug ? `\n\n[诊断] ${this.coldDiag}` : "";
-		return `📋 会话列表（${all.length} 个${scope}）：\n${lines.join("\n")}${tail}\n\n回复 /use <序号> 切换（📦会自动唤醒）`;
+		return `📋 会话列表（${all.length} 个）：\n${lines.join("\n")}${tail}\n\n回复 /use <序号> 切换（📦会自动唤醒）`;
 	}
 	async useSession(windowKey, arg) {
-		if (!arg) return await this.listSessions(windowKey, "");
+		if (!arg) return await this.listSessions();
 		const list = this.lastList.length > 0 ? this.lastList : await this.allSessions();
 		let entry = null;
 		const index = Number.parseInt(arg, 10);
@@ -3027,7 +2998,7 @@ var SessionBridge = class {
 	}
 };
 const HELP_TEXT = `🤖 dsh-chatops 指令：
-/sessions — 当前工作区的会话（/sessions all 全部，/sessions debug 诊断）
+/sessions — 会话列表（/sessions all 含子会话）
 /use <编号> — 绑定会话
 /bind — 查看当前绑定
 /status — 会话运行状态
