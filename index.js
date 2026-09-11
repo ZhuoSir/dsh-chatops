@@ -2649,9 +2649,9 @@ var SessionBridge = class {
 		const lines = all.map((s, i) => {
 			const status = s.live ? this.turnStatus.get(s.id) === "running" ? "🔄" : "💤" : "📦";
 			const title = s.title.length > 20 ? s.title.slice(0, 20) + "…" : s.title;
-			const collides = (groups.get(`${s.title}|${s.cwdName ?? ""}`) ?? 0) > 1;
-			const tag = [s.cwdName ? `（${s.cwdName}）` : "", collides ? ` #${s.code}` : ""].join("");
-			return `${i + 1}. ${title} ${status}${tag}`;
+			const tag = (groups.get(`${s.title}|${s.cwdName ?? ""}`) ?? 0) > 1 ? ` #${s.code}` : "";
+			const head = s.cwdName ? `${s.cwdName} - ` : "";
+			return `${i + 1}. ${head}${title} ${status}${tag}`;
 		});
 		const scope = scopeName ? `，工作区 ${scopeName}` : showAll ? "，全部" : "，全部（绑定会话后按工作区过滤）";
 		const tail = debug ? `\n\n[诊断] ${this.coldDiag}` : "";
