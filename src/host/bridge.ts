@@ -166,6 +166,8 @@ export class SessionBridge {
     for (const agent of this.roots()) {
       const s = agent?.session
       if (!s?.id || seen.has(s.id)) continue
+      // fork 副本（parentSession 非空）与冷记录同规则：默认只保留原会话。
+      if (!includeChildren && s.header?.parentSession) continue
       seen.add(s.id)
       out.push({
         id: s.id,

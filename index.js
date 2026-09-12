@@ -2344,6 +2344,7 @@ var SessionBridge = class {
 		for (const agent of this.roots()) {
 			const s = agent?.session;
 			if (!s?.id || seen.has(s.id)) continue;
+			if (!includeChildren && s.header?.parentSession) continue;
 			seen.add(s.id);
 			out.push({
 				id: s.id,
