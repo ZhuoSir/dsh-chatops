@@ -92,6 +92,13 @@ export class AuthStore {
     return binding
   }
 
+  /** All session ids any window is currently bound to (blank-session exception). */
+  boundSessionIds(): Set<string> {
+    const out = new Set<string>()
+    for (const b of this.bindings.values()) if (b.sessionId) out.add(b.sessionId)
+    return out
+  }
+
   /** Which windows currently point at this session (for push routing). */
   windowsForSession(sessionId: string): string[] {
     const out: string[] = []

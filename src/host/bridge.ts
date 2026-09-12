@@ -160,7 +160,94 @@ export class SessionBridge {
    * 全量顶层会话：live roots 在前（可交互），其后是持久化里的冷会话。
    * 结果缓存到 lastList，供 /use <编号> 按同一顺序取。
    */
+  /**
+   * GUI 侧边栏同口径的会话目录：优先走 apiProxy.sessions.list（与 GUI 完全
+   * 同源），过滤 origin=subagent / 归档 / 空白会话，排序按工作区注册表。
+   * apiProxy 不可用（headless）时回退 live+cold 的 legacy 路径。
+   */
   private async allSessions(includeChildren = false): Promise<Array<SessionEntry>> {
+    const api = this.apiProxy()
+    if (api?.sessions?.list) {
+      try {
+        return await this.allSessionsViaApi(api, includeChildren)
+      } catch (error: any) {
+        this.coldDiag = `apiProxy 目录异常: ${error?.message ?? error}`
+      }
+    }
+    return this.allSessionsLegacy(includeChildren)
+  }
+
+  /** sessionId → 注册表显示序（workspaceIds 顺序 × sessionIds 顺序）。 */
+  private registryRank(): Map<string, number> {
+    const rank = new Map<string, number>()
+    try {
+      const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+      const raw = JSON.parse(readFileSync(join(dshHome, 'storages', 'workspace.json'), 'utf8'))
+      const workspaces = raw?.tables?.workspaces ?? {}
+      const order: string[] = raw?.global?.workspaceIds ?? Object.keys(workspaces)
+      let n = 0
+      for (const wid of order) {
+        for (const sid of workspaces[wid]?.sessionIds ?? []) rank.set(sid, n++)
+      }
+    } catch {
+      /* registry unreadable — everything unranked */
+    }
+    return rank
+  }
+
+  /** The GUI-identical catalog: same source, same filters, same ordering. */
+  private async allSessionsViaApi(api: any, includeChildren: boolean): Promise<Array<SessionEntry>> {
+    const value = await api.sessions.list({})
+    const items: any[] = Array.isArray(value) ? value : (value?.items ?? [])
+    const archived = this.archivedIds()
+    const bound = this.auth.boundSessionIds()
+    const rank = this.registryRank()
+    const UNRANKED = Number.MAX_SAFE_INTEGER
+    // GUI 过滤口径（dsh-client-ui-workspace sessionVisible）：
+    //   origin !== 'subagent' && !archived && (!blank || 是当前会话)
+    const filtered = items.filter((it) => {
+      const id = it?.sessionId
+      if (!id) return false
+      if (!includeChildren && it.origin === 'subagent') return false
+      if (archived.has(id)) return false
+      if (it.blank && !bound.has(id) && !this.liveAgentOf(id)) return false
+      return true
+    })
+    filtered.sort((a, b) => {
+      const ra = rank.get(a.sessionId) ?? UNRANKED
+      const rb = rank.get(b.sessionId) ?? UNRANKED
+      if (ra !== rb) return ra - rb
+      return (b.updatedAt ?? 0) - (a.updatedAt ?? 0)
+    })
+    const q = this.query()
+    const out: Array<SessionEntry> = []
+    let titleFails = 0
+    await Promise.all(filtered.map(async (it) => {
+      const id = it.sessionId
+      const liveAgent = this.liveAgentOf(id)
+      let title: string | null = null
+      try {
+        const t = await q?.readTitle?.(id)
+        title = typeof t === 'string' ? t : (t?.title ?? null)
+      } catch (e: any) {
+        titleFails++
+        if (titleFails === 1) this.coldDiag += `；readTitle 异常: ${e?.message ?? e}`
+      }
+      out.push({
+        id,
+        title: title ?? (liveAgent ? this.titleOf(liveAgent.session) : null) ?? '未命名会话',
+        live: Boolean(liveAgent),
+        agent: liveAgent ?? undefined,
+        cwdName: cwdBasename(it.cwd ?? liveAgent?.session?.header?.cwd),
+        code: shortCode(id),
+      })
+    }))
+    this.coldDiag = `目录 ${items.length} 条；显示 ${filtered.length} 条（GUI 同口径）`
+    this.lastList = out
+    return out
+  }
+
+  private async allSessionsLegacy(includeChildren = false): Promise<Array<SessionEntry>> {
     const out: Array<SessionEntry> = []
     const seen = new Set<string>()
     const q = this.query()
