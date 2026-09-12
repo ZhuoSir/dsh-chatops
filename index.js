@@ -2950,15 +2950,36 @@ var SessionBridge = class {
 	}
 	async forwardPrompt(msg, text) {
 		const windowKey = msg.windowKey;
-		let sessionId = this.auth.getBinding(windowKey)?.sessionId;
+		const sessionId = this.auth.getBinding(windowKey)?.sessionId;
 		let agent = sessionId ? this.liveAgentOf(sessionId) : null;
-		if (!agent && sessionId) try {
-			await this.ctx.agents.resume({
-				resumeSessionId: sessionId,
-				agentOptions: this.seedAgentOptions()
-			});
-			agent = this.liveAgentOf(sessionId);
-		} catch {}
+		if (sessionId && !agent) {
+			try {
+				await this.ctx.agents.resume({
+					resumeSessionId: sessionId,
+					agentOptions: this.seedAgentOptions()
+				});
+				agent = this.liveAgentOf(sessionId);
+			} catch (error) {
+				const reason = error?.message ?? String(error);
+				this.auth.audit("session/wake-failed", {
+					sessionId,
+					windowKey,
+					reason
+				});
+				this.logger.warn(`dsh-chatops: resume ${sessionId} failed: ${reason}`);
+				await this.channel.say(windowKey, `⚠️ 会话暂时无法唤醒（${reason}），消息未发送。请稍后再试，或 /use 重新绑定。`);
+				return;
+			}
+			if (!agent) {
+				this.auth.audit("session/wake-failed", {
+					sessionId,
+					windowKey,
+					reason: "resume 返回但 agent 未就绪"
+				});
+				await this.channel.say(windowKey, "⚠️ 会话唤醒超时，消息未发送。请再发一次。");
+				return;
+			}
+		}
 		if (!agent) {
 			agent = this.lastActiveRoot && this.roots().includes(this.lastActiveRoot) ? this.lastActiveRoot : this.roots()[this.roots().length - 1];
 			if (!agent) {

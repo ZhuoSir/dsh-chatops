@@ -838,21 +838,35 @@ export class SessionBridge {
 
   private async forwardPrompt(msg: InboundMessage, text: string): Promise<void> {
     const windowKey = msg.windowKey
-    let sessionId = this.auth.getBinding(windowKey)?.sessionId
+    const sessionId = this.auth.getBinding(windowKey)?.sessionId
     let agent = sessionId ? this.liveAgentOf(sessionId) : null
 
-    // 绑定的是冷会话（未加载）：先尝试从持久化日志唤醒
-    if (!agent && sessionId) {
+    // 绑定的是冷会话（未加载）：先尝试从持久化日志唤醒。
+    // 有绑定时绝不兜底投递到其他会话、绝不改绑定——失败就如实告知。
+    if (sessionId && !agent) {
       try {
         await this.ctx.agents.resume({ resumeSessionId: sessionId, agentOptions: this.seedAgentOptions() })
         agent = this.liveAgentOf(sessionId)
-      } catch {
-        /* 唤醒失败则走下面的最近活跃兜底 */
+      } catch (error: any) {
+        const reason = error?.message ?? String(error)
+        this.auth.audit('session/wake-failed', { sessionId, windowKey, reason })
+        this.logger.warn(`dsh-chatops: resume ${sessionId} failed: ${reason}`)
+        await this.channel.say(
+          windowKey,
+          `⚠️ 会话暂时无法唤醒（${reason}），消息未发送。请稍后再试，或 /use 重新绑定。`,
+        )
+        return
+      }
+      if (!agent) {
+        this.auth.audit('session/wake-failed', { sessionId, windowKey, reason: 'resume 返回但 agent 未就绪' })
+        await this.channel.say(windowKey, '⚠️ 会话唤醒超时，消息未发送。请再发一次。')
+        return
       }
     }
 
-    // Fallback: deliver to the most recently active root (same heuristic as
-    // dsh-cron) and bind this window to it, so the first message "just works".
+    // Fallback（仅限从未绑定过的窗口）：deliver to the most recently active
+    // root (same heuristic as dsh-cron) and bind, so the first message
+    // "just works".
     if (!agent) {
       agent = this.lastActiveRoot && this.roots().includes(this.lastActiveRoot)
         ? this.lastActiveRoot
