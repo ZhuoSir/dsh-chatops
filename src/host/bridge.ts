@@ -163,12 +163,42 @@ export class SessionBridge {
   private async allSessions(includeChildren = false): Promise<Array<SessionEntry>> {
     const out: Array<SessionEntry> = []
     const seen = new Set<string>()
+    const q = this.query()
+    let records: any[] = []
+    if (!q?.listSessions) {
+      this.coldDiag = 'sessionQuery 服务不可用'
+    } else {
+      try {
+        records = await q.listSessions()
+        this.coldDiag = `冷记录 ${records.length} 条`
+      } catch (e: any) {
+        records = []
+        this.coldDiag = `listSessions 异常: ${e?.message ?? e}`
+      }
+    }
+
+    // 可见池：所有活会话 + 未归档的持久化会话。
+    // 子会话（fork/subagent）仅当其父会话也在池中时才隐藏——
+    // 父级已被归档的"孤儿"子会话照常显示（它就是这个分支的代表）。
+    const archived = this.archivedIds()
+    const poolIds = new Set<string>()
+    const live: Array<{ agent: any; s: any }> = []
     for (const agent of this.roots()) {
       const s = agent?.session
       if (!s?.id || seen.has(s.id)) continue
-      // fork 副本（parentSession 非空）与冷记录同规则：默认只保留原会话。
-      if (!includeChildren && s.header?.parentSession) continue
       seen.add(s.id)
+      poolIds.add(s.id)
+      live.push({ agent, s })
+    }
+    for (const r of records) {
+      const h = r?.header ?? r
+      if (h?.id && !archived.has(h.id)) poolIds.add(h.id)
+    }
+    const childHidden = (header: any) =>
+      !includeChildren && header?.parentSession && poolIds.has(header.parentSession)
+
+    for (const { agent, s } of live) {
+      if (childHidden(s.header)) continue
       out.push({
         id: s.id,
         title: this.titleOf(s),
@@ -178,27 +208,15 @@ export class SessionBridge {
         code: shortCode(s.id),
       })
     }
-    const q = this.query()
-    if (!q?.listSessions) {
-      this.coldDiag = 'sessionQuery 服务不可用'
-    } else {
-      let records: any[] = []
-      try {
-        records = await q.listSessions()
-        this.coldDiag = `冷记录 ${records.length} 条`
-      } catch (e: any) {
-        records = []
-        this.coldDiag = `listSessions 异常: ${e?.message ?? e}`
-      }
+    if (q?.listSessions) {
       // 与 GUI 口径一致：唯一过滤条件是"未归档"（continuable 子会话 GUI 也显示，不排除）
       // SessionRecord 结构: { header: { id, cwd, parentSession? }, live, persisted }
       // 子会话（subagent/workflow/goal 续跑产生的 parentSession 非空记录）
       // 默认隐藏——它们不是用户创建的"会话"，全列出会淹没列表。
-      const archived = this.archivedIds()
       const cold = records.filter((r) => {
         const h = r?.header ?? r
         if (!h?.id || seen.has(h.id) || archived.has(h.id)) return false
-        if (!includeChildren && h.parentSession) return false
+        if (childHidden(h)) return false
         return true
       })
       let titleFails = 0

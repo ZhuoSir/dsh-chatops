@@ -2341,11 +2341,36 @@ var SessionBridge = class {
 	async allSessions(includeChildren = false) {
 		const out = [];
 		const seen = /* @__PURE__ */ new Set();
+		const q = this.query();
+		let records = [];
+		if (!q?.listSessions) this.coldDiag = "sessionQuery 服务不可用";
+		else try {
+			records = await q.listSessions();
+			this.coldDiag = `冷记录 ${records.length} 条`;
+		} catch (e) {
+			records = [];
+			this.coldDiag = `listSessions 异常: ${e?.message ?? e}`;
+		}
+		const archived = this.archivedIds();
+		const poolIds = /* @__PURE__ */ new Set();
+		const live = [];
 		for (const agent of this.roots()) {
 			const s = agent?.session;
 			if (!s?.id || seen.has(s.id)) continue;
-			if (!includeChildren && s.header?.parentSession) continue;
 			seen.add(s.id);
+			poolIds.add(s.id);
+			live.push({
+				agent,
+				s
+			});
+		}
+		for (const r of records) {
+			const h = r?.header ?? r;
+			if (h?.id && !archived.has(h.id)) poolIds.add(h.id);
+		}
+		const childHidden = (header) => !includeChildren && header?.parentSession && poolIds.has(header.parentSession);
+		for (const { agent, s } of live) {
+			if (childHidden(s.header)) continue;
 			out.push({
 				id: s.id,
 				title: this.titleOf(s),
@@ -2355,22 +2380,11 @@ var SessionBridge = class {
 				code: shortCode(s.id)
 			});
 		}
-		const q = this.query();
-		if (!q?.listSessions) this.coldDiag = "sessionQuery 服务不可用";
-		else {
-			let records = [];
-			try {
-				records = await q.listSessions();
-				this.coldDiag = `冷记录 ${records.length} 条`;
-			} catch (e) {
-				records = [];
-				this.coldDiag = `listSessions 异常: ${e?.message ?? e}`;
-			}
-			const archived = this.archivedIds();
+		if (q?.listSessions) {
 			const cold = records.filter((r) => {
 				const h = r?.header ?? r;
 				if (!h?.id || seen.has(h.id) || archived.has(h.id)) return false;
-				if (!includeChildren && h.parentSession) return false;
+				if (childHidden(h)) return false;
 				return true;
 			});
 			let titleFails = 0;
